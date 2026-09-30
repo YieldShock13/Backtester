@@ -18,10 +18,12 @@ s=Path('app.py').read_text()
 if "st.selectbox('Rebalancing frequency',['Annual','Semi-Annual','Quarterly','Monthly','Weekly']" not in s: runpy.run_path('scripts/rebalancing_frequency_patch.py',run_name='__main__')
 s=Path('app.py').read_text()
 if "LaTeX / Diagnostics" not in s and "Linearity Test: Show LaTeX" not in s: runpy.run_path('scripts/correlation_diagnostics_patch.py',run_name='__main__')
+s=Path('app.py').read_text()
+if "Align by portfolio week, not exact timestamp" not in s: runpy.run_path('scripts/fix_fx_weekly_alignment.py',run_name='__main__')
 # Always apply the final naming pass so an already-deployed diagnostics block is renamed.
 runpy.run_path('scripts/rename_linearity_labels.py',run_name='__main__')
 s=p.read_text()
-for required in ["ORCA'S","Benchmark (optional)","Negative weight = short position","Portfolio leverage (x)","Correlation measure","['Pearson','Spearman']","Average Inter-Asset {corr_method} Correlation","with st.expander('Full Disclaimer'","st.selectbox('Rebalancing frequency',['Annual','Semi-Annual','Quarterly','Monthly','Weekly']","Linearity Test: Show LaTeX","Linearity Test — Methodology & Results","This linearity test examines whether each asset-pair return relationship","Linearity flag:"]:
+for required in ["ORCA'S","Benchmark (optional)","Negative weight = short position","Portfolio leverage (x)","Correlation measure","['Pearson','Spearman']","Average Inter-Asset {corr_method} Correlation","with st.expander('Full Disclaimer'","st.selectbox('Rebalancing frequency',['Annual','Semi-Annual','Quarterly','Monthly','Weekly']","Linearity Test: Show LaTeX","Linearity Test — Methodology & Results","This linearity test examines whether each asset-pair return relationship","Linearity flag:","Align by portfolio week, not exact timestamp","same-week aligned observations"]:
  assert required in s,required
 assert "st.button('LaTeX / Diagnostics'" not in s
 assert "@st.dialog('Correlation Diagnostics & LaTeX'" not in s
