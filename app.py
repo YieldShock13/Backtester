@@ -178,7 +178,7 @@ def line_chart(series_map,title,ytitle):
 def stats(v,market_r,rf,ppy):
  p=v.PORTFOLIO; r=p.pct_change(fill_method=None).dropna(); yrs=max((p.index[-1]-p.index[0]).days/365.25,1/365.25); cagr=(p.iloc[-1]/p.iloc[0])**(1/yrs)-1; vol=r.std()*np.sqrt(ppy); rfp=(1+rf)**(1/ppy)-1; ex=r-rfp; down=ex[ex<0]; dvol=np.sqrt(np.mean(down**2))*np.sqrt(ppy); dd=p/p.cummax()-1
  d=pd.concat([r.rename('P'),market_r.rename('M')],axis=1).dropna(); x=d.M-rfp; y=d.P-rfp; beta=y.cov(x)/x.var() if x.var()>0 else np.nan; alpha=(1+y.mean()-beta*x.mean())**ppy-1 if np.isfinite(beta) else np.nan; var=r.quantile(.05)
- return {'Initial Value':p.iloc[0],'Ending Value':p.iloc[-1],'Total Return':p.iloc[-1]/p.iloc[0]-1,'CAGR':cagr,'Annualised Volatility':vol,'Sharpe Ratio':ex.mean()/ex.std()*np.sqrt(ppy) if ex.std()>0 else np.nan,'Downside Volatility':dvol,'Sortino Ratio':ex.mean()*ppy/dvol if dvol>0 else np.nan,'Beta vs ALSI':beta,'CAPM Alpha (Annualised)':alpha,'Maximum Drawdown':dd.min(),'Calmar Ratio':cagr/abs(dd.min()) if dd.min()<0 else np.nan,'Period VaR 95%':var,'Period CVaR 95%':r[r<=var].mean(),'Best Period':r.max(),'Worst Period':r.min(),'Positive Periods':(r>0).mean(),'Max DD Date':dd.idxmin()}
+ return {'Initial Value':p.iloc[0],'Ending Value':p.iloc[-1],'Total Return':p.iloc[-1]/p.iloc[0]-1,'CAGR':cagr,'Annualised Volatility':vol,'Sharpe Ratio':ex.mean()/ex.std()*np.sqrt(ppy) if ex.std()>0 else np.nan,'Downside Volatility':dvol,'Sortino Ratio':ex.mean()*ppy/dvol if dvol>0 else np.nan,'Beta vs Benchmark':beta,'CAPM Alpha (Annualised)':alpha,'Maximum Drawdown':dd.min(),'Calmar Ratio':cagr/abs(dd.min()) if dd.min()<0 else np.nan,'Period VaR 95%':var,'Period CVaR 95%':r[r<=var].mean(),'Best Period':r.max(),'Worst Period':r.min(),'Positive Periods':(r>0).mean(),'Max DD Date':dd.idxmin()}
 
 def metric_table(m):
  pct={'Total Return','CAGR','Annualised Volatility','Downside Volatility','CAPM Alpha (Annualised)','Maximum Drawdown','Period VaR 95%','Period CVaR 95%','Best Period','Worst Period','Positive Periods'}; rows=[]
@@ -370,7 +370,7 @@ try:
 except Exception as e: st.error(f'Data update/validation failed: {e}'); st.exception(e); st.stop()
 data_flags=[]
 if start>requested: data_flags.append(f'Requested start {requested:%Y-%m-%d} unavailable for the selected common asset set; backtest starts at {start:%Y-%m-%d}.')
-frequency='daily' if daily_mode else 'month-end'; st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} observations | Nominal {INITIAL:,.0f} | RF {RF:.2%} | Dividends '+('reinvested' if REINVEST else 'retained as cash')+(' | FX beta hedge active' if FX_HEDGED and HEDGED_ASSETS else ' | FX unhedged'))
+frequency='daily' if daily_mode else 'month-end'; st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} observations | Nominal {PORTFOLIO_CCY} {INITIAL:,.0f} | RF {RF:.2%} | Dividends '+('reinvested' if REINVEST else 'retained as cash')+(' | FX beta hedge active' if FX_HEDGED and HEDGED_ASSETS else ' | FX unhedged'))
 if FX_HEDGED and HEDGED_ASSETS and not fx_hedge_report.empty:
  st.subheader('FX Beta Hedge — In-Sample Estimates'); fxshow=fx_hedge_report.copy(); fxshow['Alpha (periodic)']=fxshow['Alpha (periodic)'].map(lambda x:f'{x:.4%}'); fxshow['FX Beta / Hedge Ratio']=fxshow['FX Beta / Hedge Ratio'].map(lambda x:f'{x:.4f}'); fxshow['R²']=fxshow['R²'].map(lambda x:f'{x:.4f}'); st.dataframe(fxshow,hide_index=True,use_container_width=True)
 if data_flags: st.warning('DATA FLAGS — '+' | '.join(data_flags))
@@ -503,7 +503,7 @@ def show_latex_report():
  st.write('Net inter-asset correlation = '+('N/A' if not np.isfinite(net_corr) else f'{net_corr:.6f}'))
  st.header('17. CAPM beta')
  st.latex(r'x_t=r_{m,t}-r_f,\qquad y_t=r_{p,t}-r_f,\qquad \beta=\frac{Cov(y,x)}{Var(x)}')
- st.write(f'Benchmark={BENCHMARK_TICKER}; current beta={met["Beta vs ALSI"]:.6f}.')
+ st.write(f'Benchmark={BENCHMARK}; current beta={met["Beta vs Benchmark"]:.6f}.')
  st.header('18. CAPM alpha')
  st.latex(r'\alpha_{period}=\bar y-\beta\bar x')
  st.latex(r'\alpha_{ann}=(1+\alpha_{period})^N-1')
