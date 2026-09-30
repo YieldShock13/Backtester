@@ -160,14 +160,22 @@ def resolve_dates(index,timeline,custom_start,custom_end,daily=False):
  if len(available)==0: raise RuntimeError('No observations in requested timeline')
  return available[0],available[-1],requested
 
-def portfolio_values(prices,divs,alloc,reinvest,rebalance=False,hedge_returns=None):
+def portfolio_values(prices,divs,alloc,reinvest,rebalance_frequency=None,hedge_returns=None):
  assets=list(alloc); target=pd.Series(alloc,dtype=float)/sum(alloc.values()); units=pd.Series({a:alloc[a]/float(prices[a].iloc[0]) for a in assets}); cash=pd.Series(0.0,index=assets)
  v=pd.DataFrame(index=prices.index,columns=assets,dtype=float); v.iloc[0]=pd.Series(alloc)
  hedge_returns=hedge_returns if hedge_returns is not None else pd.DataFrame(0.0,index=prices.index,columns=assets)
  hedge_returns=hedge_returns.reindex(index=prices.index,columns=assets,fill_value=0.0).fillna(0.0)
+ def _rebalance_due(prev,dt,freq):
+  if not freq: return False
+  if freq=='Weekly': return True
+  if freq=='Monthly': return (dt.year,dt.month)!=(prev.year,prev.month)
+  if freq=='Quarterly': return (dt.year,(dt.month-1)//3)!=(prev.year,(prev.month-1)//3)
+  if freq=='Semi-Annual': return (dt.year,(dt.month-1)//6)!=(prev.year,(prev.month-1)//6)
+  if freq=='Annual': return dt.year!=prev.year
+  return False
  for i in range(1,len(prices)):
   dt=prices.index[i]; prev=prices.index[i-1]
-  if rebalance and dt.year!=prev.year:
+  if _rebalance_due(prev,dt,rebalance_frequency):
    total=(units*prices.loc[prev,assets]+cash).sum(); units=(target*total)/prices.loc[prev,assets]; cash[:]=0.0
   prev_exposure=units*prices.loc[prev,assets]
   hedge_pnl=prev_exposure*hedge_returns.loc[dt,assets]
@@ -428,7 +436,7 @@ try:
   fx_hedge_returns=pd.DataFrame(0.0,index=prices.index,columns=ASSETS); fx_hedge_report=pd.DataFrame()
   if FX_HEDGED and HEDGED_ASSETS:
    fx_hedge_returns,fx_hedge_report=estimate_fx_hedges(prices,divs,HEDGED_ASSETS,FX_PAIRS,daily_mode)
-  bh=portfolio_values(prices,divs,ALLOC,REINVEST,False,fx_hedge_returns); rb=portfolio_values(prices,divs,ALLOC,REINVEST,True,fx_hedge_returns)
+  bh=portfolio_values(prices,divs,ALLOC,REINVEST,None,fx_hedge_returns)
 except Exception as e: st.error(f'Data update/validation failed: {e}'); st.exception(e); st.stop()
 data_flags=[]
 # Weekly alignment exclusions are documented in Data Audit; they are not promoted to DATA FLAGS unless they prevent the backtest.
@@ -439,7 +447,13 @@ frequency='weekly (Friday-labelled; last available trading close)'; st.caption(f
 if FX_HEDGED and HEDGED_ASSETS and not fx_hedge_report.empty:
  st.subheader('FX Beta Hedge — In-Sample Estimates'); fxshow=fx_hedge_report.copy(); fxshow['Alpha (periodic)']=fxshow['Alpha (periodic)'].map(lambda x:f'{x:.4%}'); fxshow['FX Beta / Hedge Ratio']=fxshow['FX Beta / Hedge Ratio'].map(lambda x:f'{x:.4f}'); fxshow['R²']=fxshow['R²'].map(lambda x:f'{x:.4f}'); st.dataframe(fxshow,hide_index=True,use_container_width=True)
 if data_flags: st.warning('DATA FLAGS — '+' | '.join(data_flags))
-mode=st.radio('Backtest mode',['Buy & Hold','Annual Rebalanced'],horizontal=True,index=0); vals=(bh if mode=='Buy & Hold' else rb).copy()
+mode=st.selectbox('Backtest mode',['Buy & Hold','Rebalanced'],index=0,key='backtest_mode')
+if mode=='Rebalanced':
+ rebalance_frequency=st.selectbox('Rebalancing frequency',['Annual','Semi-Annual','Quarterly','Monthly','Weekly'],index=0,key='rebalance_frequency',help='Portfolio is reset to the configured target weights at the first available weekly observation of each selected rebalance period.')
+ vals=portfolio_values(prices,divs,ALLOC,REINVEST,rebalance_frequency,fx_hedge_returns).copy()
+ mode_label=f'{rebalance_frequency} Rebalanced'
+else:
+ rebalance_frequency=None; vals=bh.copy(); mode_label='Buy & Hold'
 # Additional leverage is applied to the configured long/short portfolio return. Financing
 # cost is charged only on borrowed capital (L-1), converted to an effective weekly rate.
 base_portfolio=vals.PORTFOLIO.copy(); base_r=base_portfolio.pct_change(fill_method=None)
@@ -452,11 +466,11 @@ portfolio_r_for_benchmark=vals.PORTFOLIO.pct_change(fill_method=None)
 benchmark_analysis=pd.concat([portfolio_r_for_benchmark.rename('Portfolio'),market_r.rename('Benchmark')],axis=1).dropna() if USE_BENCHMARK else pd.DataFrame(columns=['Portfolio','Benchmark'])
 benchmark_return_aligned=benchmark_analysis['Benchmark'] if USE_BENCHMARK else pd.Series(dtype=float)
 met=stats(vals,benchmark_return_aligned,RF,ppy)
-c1,c2,c3,c4=st.columns(4); c1.metric(f'{mode} Value',f"{met['Ending Value']:,.0f}"); c2.metric(f'{mode} CAGR',f"{met['CAGR']:.2%}"); c3.metric(f'Sharpe ({RF:.2%} RF)',f"{met['Sharpe Ratio']:.3f}"); c4.metric('Max Drawdown',f"{met['Maximum Drawdown']:.2%}")
-st.subheader(f'{mode} Analytics'); st.dataframe(metric_table(met),hide_index=True,use_container_width=True)
+c1,c2,c3,c4=st.columns(4); c1.metric(f'{mode_label} Value',f"{met['Ending Value']:,.0f}"); c2.metric(f'{mode_label} CAGR',f"{met['CAGR']:.2%}"); c3.metric(f'Sharpe ({RF:.2%} RF)',f"{met['Sharpe Ratio']:.3f}"); c4.metric('Max Drawdown',f"{met['Maximum Drawdown']:.2%}")
+st.subheader(f'{mode_label} Analytics'); st.dataframe(metric_table(met),hide_index=True,use_container_width=True)
 p=vals.PORTFOLIO; r=p.pct_change(fill_method=None).dropna(); growth=p/p.iloc[0]*100; dd=(p/p.cummax()-1)*100; roll_n=52; sharpe_n=156; roll_ret=((1+r).rolling(roll_n).apply(np.prod,raw=True)-1)*100; roll_vol=r.rolling(roll_n).std()*np.sqrt(ppy)*100; ex=r-((1+RF)**(1/ppy)-1); roll_sr=ex.rolling(sharpe_n).mean()/ex.rolling(sharpe_n).std()*np.sqrt(ppy)
-line_chart({mode:p},f'{mode} — Portfolio Value','Value'); line_chart({mode:growth},f'{mode} — Growth of 100','Value'); line_chart({'Drawdown':dd},f'{mode} — Portfolio Drawdown','%'); line_chart({'Rolling 1Y Total Return':roll_ret},f'{mode} — Rolling 1-Year Total Return','%'); line_chart({'Rolling 1Y Volatility':roll_vol},f'{mode} — Rolling 1-Year Annualised Volatility','%'); line_chart({'Rolling 3Y Sharpe':roll_sr},f'{mode} — Rolling 3-Year Sharpe Ratio','Sharpe'); line_chart({c0:vals[c0] for c0 in ASSETS},f'{mode} — Portfolio Sleeve Values','Value')
-st.subheader(f'{mode} Annual Total Returns'); ar=annual_returns(vals); ar['Annual Total Return']=ar['Annual Total Return'].map(lambda x:f'{x:.2%}'); st.dataframe(ar,hide_index=True,use_container_width=True)
+line_chart({mode_label:p},f'{mode_label} — Portfolio Value','Value'); line_chart({mode_label:growth},f'{mode_label} — Growth of 100','Value'); line_chart({'Drawdown':dd},f'{mode_label} — Portfolio Drawdown','%'); line_chart({'Rolling 1Y Total Return':roll_ret},f'{mode_label} — Rolling 1-Year Total Return','%'); line_chart({'Rolling 1Y Volatility':roll_vol},f'{mode_label} — Rolling 1-Year Annualised Volatility','%'); line_chart({'Rolling 3Y Sharpe':roll_sr},f'{mode_label} — Rolling 3-Year Sharpe Ratio','Sharpe'); line_chart({c0:vals[c0] for c0 in ASSETS},f'{mode_label} — Portfolio Sleeve Values','Value')
+st.subheader(f'{mode_label} Annual Total Returns'); ar=annual_returns(vals); ar['Annual Total Return']=ar['Annual Total Return'].map(lambda x:f'{x:.2%}'); st.dataframe(ar,hide_index=True,use_container_width=True)
 st.subheader('Annual Total Return by Ticker'); aar=annual_asset_returns(prices,divs,ASSETS)
 for c0 in ASSETS: aar[c0]=aar[c0].map(lambda x:f'{x:.2%}' if pd.notna(x) else 'N/A')
 st.dataframe(aar,hide_index=True,use_container_width=True)
@@ -467,12 +481,12 @@ for a0 in ASSETS:
 at=pd.DataFrame(attr)
 for c0 in ['Total Return','Capital Gain','Income / Distributions','Capital Gain % of Total','Income % of Total']: at[c0]=at[c0].map(lambda x:f'{x:.2%}' if pd.notna(x) else 'N/A')
 st.dataframe(at,hide_index=True,use_container_width=True)
-weights_end=vals[ASSETS].div(vals.PORTFOLIO,axis=0); wt=pd.DataFrame({'Ticker':ASSETS,'Initial Weight':[weights[a0] for a0 in ASSETS],'Ending Weight':weights_end.iloc[-1].values}); wt['Initial Weight']=wt['Initial Weight'].map(lambda x:f'{x:.2%}'); wt['Ending Weight']=wt['Ending Weight'].map(lambda x:f'{x:.2%}'); st.subheader(f'{mode} Portfolio Weights'); st.dataframe(wt,hide_index=True,use_container_width=True)
+weights_end=vals[ASSETS].div(vals.PORTFOLIO,axis=0); wt=pd.DataFrame({'Ticker':ASSETS,'Initial Weight':[weights[a0] for a0 in ASSETS],'Ending Weight':weights_end.iloc[-1].values}); wt['Initial Weight']=wt['Initial Weight'].map(lambda x:f'{x:.2%}'); wt['Ending Weight']=wt['Ending Weight'].map(lambda x:f'{x:.2%}'); st.subheader(f'{mode_label} Portfolio Weights'); st.dataframe(wt,hide_index=True,use_container_width=True)
 st.divider(); st.subheader('Asset Correlation')
 corr_method=st.segmented_control('Correlation measure',['Pearson','Spearman'],default='Pearson',selection_mode='single',key='corr_method') or 'Pearson'
 corr=asset_r[ASSETS].dropna().corr(method=corr_method.lower()); mask=np.triu(np.ones(corr.shape,dtype=bool),k=1); net_corr=float(corr.where(mask).stack().mean()) if len(corr)>1 else np.nan; st.metric(f'Average Inter-Asset {corr_method} Correlation','N/A' if not np.isfinite(net_corr) else f'{net_corr:.3f}'); heat=go.Figure(data=go.Heatmap(z=corr.values,x=corr.columns,y=corr.index,zmin=-1,zmax=1,zmid=0,colorscale='RdBu',reversescale=True,text=np.round(corr.values,2),texttemplate='%{text:.2f}')); heat.update_layout(title=f'{corr_method} Correlation Matrix'); st.plotly_chart(heat,use_container_width=True)
 if USE_BENCHMARK:
- st.divider(); st.subheader(f'{mode} — Beta & Alpha Evolution vs {BENCHMARK}'); roll_beta,roll_alpha,capm_window=rolling_capm(vals,market_r,RF,ppy); line_chart({f'{capm_window}-period Rolling Beta':roll_beta},f'{mode} — Rolling Beta vs {BENCHMARK}','Beta'); line_chart({f'{capm_window}-period Rolling Alpha':roll_alpha*100},f'{mode} — Rolling Annualised CAPM Alpha','Alpha (%)'); cb,ncb=conditional_beta(vals,bp)
+ st.divider(); st.subheader(f'{mode_label} — Beta & Alpha Evolution vs {BENCHMARK}'); roll_beta,roll_alpha,capm_window=rolling_capm(vals,market_r,RF,ppy); line_chart({f'{capm_window}-period Rolling Beta':roll_beta},f'{mode} — Rolling Beta vs {BENCHMARK}','Beta'); line_chart({f'{capm_window}-period Rolling Alpha':roll_alpha*100},f'{mode} — Rolling Annualised CAPM Alpha','Alpha (%)'); cb,ncb=conditional_beta(vals,bp)
 else: cb,ncb=np.nan,0
 
 st.divider(); st.subheader('Macro Risk & Historical Scenario Analysis')
@@ -532,7 +546,7 @@ else:
 @st.dialog('Complete Quantitative Workings',width='large')
 def show_latex_report():
  st.title('Complete Quantitative Workings')
- st.caption(f'Configured run: {prices.index[0]:%Y-%m-%d} to {prices.index[-1]:%Y-%m-%d} | frequency={frequency} | N={ppy} | RF={RF:.4%} | observations={len(prices)} | mode={mode}')
+ st.caption(f'Configured run: {prices.index[0]:%Y-%m-%d} to {prices.index[-1]:%Y-%m-%d} | frequency={frequency} | N={ppy} | RF={RF:.4%} | observations={len(prices)} | mode={mode_label}')
  st.header('1. Data state, units and reconstructed returns')
  st.latex(r'P_{i,t}=\text{raw close price},\quad D_{i,t}=\text{cash distribution per unit},\quad S_{i,t}=\text{split event}')
  st.latex(r'r_{i,t}=\frac{P_{i,t}-P_{i,t-1}+D_{i,t}}{P_{i,t-1}}')
