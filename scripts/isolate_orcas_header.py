@@ -30,19 +30,21 @@ s=Path('app.py').read_text()
 if "USE_BENCHMARK=st.toggle('Use benchmark'" not in s or "benchmark_overlap_start=max(prices.index.min(),bench_valid.index.min())" not in s:
     runpy.run_path('scripts/expand_history_walkforward.py', run_name='__main__')
 
-# Feature/disclaimer layer. Full Disclaimer is its own deployment marker so later
-# revisions cannot be skipped just because leverage/correlation already exist.
 s=Path('app.py').read_text()
 if ("Portfolio leverage (x)" not in s or "Correlation measure" not in s or
     "Negative weight = short position" not in s or "with st.expander('Full Disclaimer'" not in s or
     "Average Inter-Asset {corr_method} Correlation" not in s):
     runpy.run_path('scripts/final_short_leverage_spearman_patch.py', run_name='__main__')
 
+s=Path('app.py').read_text()
+if "st.selectbox('Rebalancing frequency',['Annual','Semi-Annual','Quarterly','Monthly','Weekly']" not in s:
+    runpy.run_path('scripts/rebalancing_frequency_patch.py', run_name='__main__')
+
 s=p.read_text()
 assert '.orca-hero{' in s and "ORCA'S" in s
 for forbidden in ['.stApp{','[data-testid="stHeader"]{','[data-testid="stToolbar"]{','[data-testid="stMetric"]{','.stButton>button{']:
     assert forbidden not in s, forbidden
-for required in ["st.segmented_control('Currency'","Complete audit checks","Benchmark (optional)","USE_BENCHMARK=st.toggle('Use benchmark'","Oil +3σ Shock","US HY OAS +2σ Widening","Beta vs Benchmark","Show LaTeX","observation_date","interval='1d'","ppy=52","roll_n=52; sharpe_n=156","period='max'","Walk-Forward Validator — 52-Week Estimation Window","GARCH(1,1)","mutual_daily=daily_px.dropna(how='any')","benchmark_overlap_start=max(prices.index.min(),bench_valid.index.min())","Only those benchmark-dependent observations are dropped","Portfolio history begins","walk_forward_validation(vals,market_r if USE_BENCHMARK else None","Negative weight = short position","Portfolio leverage (x)","Annual leverage / financing cost (%)","Correlation measure","['Pearson','Spearman']","corr(method=corr_method.lower())","Average Inter-Asset {corr_method} Correlation","levered_r=LEVERAGE*base_r-(LEVERAGE-1.0)*weekly_financing","with st.expander('Full Disclaimer'","Nothing contained in or produced by this tool constitutes","Backtested, simulated and hypothetical results have inherent limitations","Leverage and short positions can materially magnify","Use of this tool does not create an adviser-client"]:
+for required in ["st.segmented_control('Currency'","Complete audit checks","Benchmark (optional)","USE_BENCHMARK=st.toggle('Use benchmark'","Oil +3σ Shock","US HY OAS +2σ Widening","Beta vs Benchmark","Show LaTeX","observation_date","interval='1d'","ppy=52","roll_n=52; sharpe_n=156","period='max'","Walk-Forward Validator — 52-Week Estimation Window","GARCH(1,1)","mutual_daily=daily_px.dropna(how='any')","benchmark_overlap_start=max(prices.index.min(),bench_valid.index.min())","Only those benchmark-dependent observations are dropped","Portfolio history begins","walk_forward_validation(vals,market_r if USE_BENCHMARK else None","Negative weight = short position","Portfolio leverage (x)","Annual leverage / financing cost (%)","Correlation measure","['Pearson','Spearman']","corr(method=corr_method.lower())","Average Inter-Asset {corr_method} Correlation","levered_r=LEVERAGE*base_r-(LEVERAGE-1.0)*weekly_financing","with st.expander('Full Disclaimer'","Nothing contained in or produced by this tool constitutes","Backtested, simulated and hypothetical results have inherent limitations","Leverage and short positions can materially magnify","Use of this tool does not create an adviser-client","st.selectbox('Backtest mode',['Buy & Hold','Rebalanced']","st.selectbox('Rebalancing frequency',['Annual','Semi-Annual','Quarterly','Monthly','Weekly']","mode_label=f'{rebalance_frequency} Rebalanced'"]:
     assert required in s, required
 assert "auto_adjust=False,actions=True" in s
 assert "['Adj Close']" not in s and '[\"Adj Close\"]' not in s
