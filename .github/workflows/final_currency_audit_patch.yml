@@ -1,0 +1,36 @@
+name: Final currency and audit patch
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/final_currency_audit_patch.py'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python scripts/final_currency_audit_patch.py
+      - run: python -m py_compile app.py
+      - name: Regression guards
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('app.py').read_text()
+          required=['orca-hero','Pearson','Historical Scenario Analysis','Show LaTeX','Full Data Audit','segmented_control','Portfolio currency','extreme-return scan','Initial portfolio identity','Scenario sample audit']
+          missing=[x for x in required if x not in s]
+          if missing: raise SystemExit('Missing regression guards: '+repr(missing))
+          print('PASS')
+          PY
+      - name: Commit patched app
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git diff --cached --quiet && exit 1
+          git commit -m 'Add compact portfolio currency and comprehensive data audit'
+          git push origin HEAD:main
