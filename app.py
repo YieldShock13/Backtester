@@ -42,7 +42,7 @@ st.markdown(r"""
  <span class="orca-glow g1"></span><span class="orca-glow g2"></span><span class="orca-glow g3"></span>
 </div>
 """,unsafe_allow_html=True)
-START="2012-02-01"
+START=None
 DEFAULT_RF=0.07
 DEFAULT_INITIAL=1_202_000
 DEFAULT_TICKERS=["^J203.JO","^GSPC","STXGVI.JO","GLD.JO","EXX.JO","BRK-B","EEM","AGG"]
@@ -72,7 +72,7 @@ def _normalise_stxgvi_close(close):
 def load_ticker_components(tickers):
  prices={}; divs={}; splits={}
  for ticker in tickers:
-  h=yf.Ticker(ticker).history(start=START,interval='1d',auto_adjust=False,actions=True)
+  h=yf.Ticker(ticker).history(period='max',interval='1d',auto_adjust=False,actions=True)
   if h.empty: raise RuntimeError(f'Market-data source returned no data for ticker {ticker}')
   h=h.copy(); h.index=pd.to_datetime(h.index).tz_localize(None); h=h.sort_index()
   close=pd.to_numeric(h['Close'],errors='coerce').dropna()
@@ -135,7 +135,7 @@ def build_master(selected):
   g0=load_govi_history(); mp=pd.DataFrame(index=g0.index); md=pd.DataFrame(index=g0.index)
  g=load_govi_history(); val={'last_govi':g.index.max(),'source':'repository GOVI'}
  if 'GOVI' in selected: raise RuntimeError('Repository GOVI is monthly-only. For the weekly backtest select a Yahoo-traded bond/index proxy with daily history instead.')
- return mp.loc[START:],md.reindex(mp.index,fill_value=0.0).loc[START:],g,val,ys
+ return mp,md.reindex(mp.index,fill_value=0.0),g,val,ys
 
 def build_daily(selected):
  if 'GOVI' in selected: raise RuntimeError('GOVI is monthly-only. For daily analysis select an instrument with daily observations, such as STXGVI.JO.')
@@ -285,6 +285,37 @@ def one_period_shock_stats(vals,market_price,factor_change,threshold,rf,ppy,labe
  beta,alpha,n=_conditional_capm(e.P,e.M,rf,ppy)
  return {'Scenario':label,'Historical Events':len(e),'Avg Portfolio Event Return':e.P.mean() if len(e) else np.nan,'Median Portfolio Event Return':e.P.median() if len(e) else np.nan,'Avg Benchmark Event Return':e.M.mean() if len(e) else np.nan,'Avg Factor Shock':e.F.mean() if len(e) else np.nan,'Worst Portfolio Event':e.P.min() if len(e) else np.nan,'Best Portfolio Event':e.P.max() if len(e) else np.nan,'Positive Portfolio Events':(e.P>0).mean() if len(e) else np.nan,'Conditional Beta':beta,'Conditional Alpha (periodic)':alpha,'CAPM Period Obs':n}
 
+def walk_forward_validation(vals,market_r,rf,ppy=52,window=52,var_method='Historical',var_level=.95):
+ rp=vals.PORTFOLIO.pct_change(fill_method=None).rename('Portfolio')
+ d=pd.concat([rp,market_r.rename('Benchmark')],axis=1).dropna()
+ rfp=(1+rf)**(1/ppy)-1; rows=[]; z95=-1.6448536269514722
+ for i in range(window,len(d)):
+  train=d.iloc[i-window:i]; test=d.iloc[i]; x=train.Benchmark-rfp; y=train.Portfolio-rfp
+  beta=y.cov(x)/x.var() if x.var()>0 else np.nan; alpha=y.mean()-beta*x.mean() if np.isfinite(beta) else np.nan
+  capm_pred=rfp+alpha+beta*(test.Benchmark-rfp) if np.isfinite(beta) else np.nan
+  tr=train.Portfolio.dropna()
+  if var_method=='Historical': q=float(tr.quantile(1-var_level)); sigma=np.nan
+  elif var_method=='Parametric':
+   mu=float(tr.mean()); sigma=float(tr.std(ddof=1)); q=mu+z95*sigma
+  else:
+   # GARCH(1,1), normal innovations; fit only to the trailing 52 weeks, forecast t+1.
+   try:
+    from arch import arch_model
+    fit=arch_model(tr.values*100,mean='Constant',vol='GARCH',p=1,q=1,dist='normal',rescale=False).fit(disp='off',show_warning=False)
+    fc=fit.forecast(horizon=1,reindex=False); mu=float(fit.params.get('mu',tr.mean()*100))/100; sigma=float(np.sqrt(fc.variance.values[-1,0]))/100; q=mu+z95*sigma
+   except Exception:
+    q=np.nan; sigma=np.nan
+  rows.append({'Date':d.index[i],'Actual Return':float(test.Portfolio),'Benchmark Return':float(test.Benchmark),'CAPM Forecast':capm_pred,'CAPM Alpha':alpha,'CAPM Beta':beta,'VaR 95%':q,'VaR Breach':bool(test.Portfolio<q) if np.isfinite(q) else False,'Forecast Sigma':sigma})
+ out=pd.DataFrame(rows).set_index('Date') if rows else pd.DataFrame()
+ return out
+
+def walk_forward_summary(wf,var_method):
+ if wf.empty: return pd.DataFrame()
+ valid=wf.dropna(subset=['Actual Return','CAPM Forecast']); rmse=float(np.sqrt(((valid['Actual Return']-valid['CAPM Forecast'])**2).mean())) if len(valid) else np.nan
+ mae=float((valid['Actual Return']-valid['CAPM Forecast']).abs().mean()) if len(valid) else np.nan
+ v=wf.dropna(subset=['VaR 95%']); breaches=int(v['VaR Breach'].sum()) if len(v) else 0; rate=breaches/len(v) if len(v) else np.nan
+ return pd.DataFrame([{'Estimation Window':'52 weeks','OOS Weeks':len(wf),'CAPM Forecast RMSE':rmse,'CAPM Forecast MAE':mae,'Mean OOS Beta':wf['CAPM Beta'].mean(),'VaR Method':var_method,'VaR Confidence':'95%','VaR Breaches':breaches,'VaR Breach Rate':rate,'Expected Breach Rate':.05}])
+
 title_col, report_col1, report_col2=st.columns([8,1,1])
 with title_col: st.title('Portfolio Backtester')
 latex_slot=report_col1.empty(); audit_slot=report_col2.empty(); st.subheader('Backtest Configuration'); a,b,c,d,e=st.columns([1.15,.75,1.15,1.15,1.15])
@@ -296,7 +327,7 @@ with e: REINVEST=st.toggle('Reinvest dividends/distributions',value=False)
 custom_start=custom_end=None
 if timeline=='Custom':
  x,y=st.columns(2)
- with x: custom_start=st.date_input('Custom start',value=pd.Timestamp(START).date())
+ with x: custom_start=st.date_input('Custom start',value=pd.Timestamp('1900-01-01').date())
  with y: custom_end=st.date_input('Custom end',value=pd.Timestamp.today().date())
 if 'selected_assets' not in st.session_state: st.session_state.selected_assets=DEFAULT_TICKERS.copy()
 st.markdown('**Assets**')
@@ -432,6 +463,27 @@ if not scenario_df.empty:
  st.dataframe(display_scen,hide_index=True,use_container_width=True)
 else: st.info('Select at least one macro risk scenario.')
 
+st.divider(); st.subheader('Walk-Forward Validator — 52-Week Estimation Window')
+st.caption('Strict one-step-ahead validation: each CAPM and VaR estimate uses only the preceding 52 weekly observations; the following week is held out for validation.')
+wf_method=st.segmented_control('VaR model',['Historical','Parametric','GARCH(1,1)'],default='Historical',selection_mode='single',key='wf_var_method') or 'Historical'
+wf=walk_forward_validation(vals,market_r,RF,ppy,52,wf_method,.95)
+wf_summary=walk_forward_summary(wf,wf_method)
+if wf.empty:
+ st.warning('Walk-forward validation requires at least 53 aligned weekly portfolio/benchmark observations.')
+else:
+ show_sum=wf_summary.copy()
+ for c0 in ['CAPM Forecast RMSE','CAPM Forecast MAE','VaR Breach Rate','Expected Breach Rate']:
+  if c0 in show_sum: show_sum[c0]=show_sum[c0].map(lambda x:f'{x:.2%}' if pd.notna(x) else 'N/A')
+ if 'Mean OOS Beta' in show_sum: show_sum['Mean OOS Beta']=show_sum['Mean OOS Beta'].map(lambda x:f'{x:.3f}' if pd.notna(x) else 'N/A')
+ st.dataframe(show_sum,hide_index=True,use_container_width=True)
+ line_chart({'Actual Weekly Return':wf['Actual Return']*100,'CAPM One-Step Forecast':wf['CAPM Forecast']*100},'Walk-Forward CAPM — Actual vs One-Step-Ahead Forecast','Return (%)')
+ line_chart({'52-Week CAPM Beta':wf['CAPM Beta']},'Walk-Forward CAPM — Estimated Beta','Beta')
+ line_chart({'Actual Weekly Return':wf['Actual Return']*100,'95% VaR Threshold':wf['VaR 95%']*100},f'Walk-Forward {wf_method} VaR — One-Step-Ahead Validation','Return (%)')
+ wf_table=wf.reset_index()[['Date','Actual Return','CAPM Forecast','CAPM Alpha','CAPM Beta','VaR 95%','VaR Breach']].copy()
+ for c0 in ['Actual Return','CAPM Forecast','CAPM Alpha','VaR 95%']: wf_table[c0]=wf_table[c0].map(lambda x:f'{x:.2%}' if pd.notna(x) else 'N/A')
+ wf_table['CAPM Beta']=wf_table['CAPM Beta'].map(lambda x:f'{x:.3f}' if pd.notna(x) else 'N/A')
+ st.dataframe(wf_table,hide_index=True,use_container_width=True)
+
 @st.dialog('Complete Quantitative Workings',width='large')
 def show_latex_report():
  st.title('Complete Quantitative Workings')
@@ -540,7 +592,13 @@ def show_latex_report():
  st.write('σ thresholds use the sample mean and sample standard deviation of factor percentage changes inside the configured backtest window. The scenario output therefore describes realised historical conditional performance; it is not a hypothetical instantaneous price shock.')
  if not macro_factor_meta_df.empty: st.dataframe(macro_factor_meta_df,hide_index=True,use_container_width=True)
  if not scenario_df.empty: st.dataframe(display_scen,hide_index=True,use_container_width=True)
- st.header('23. Complete configured metric output')
+ st.header('23. Walk-forward CAPM and VaR validation')
+ st.latex(r'\\hat\\beta_t=\\frac{Cov(r_p-r_f,r_m-r_f)_{t-52:t-1}}{Var(r_m-r_f)_{t-52:t-1}},\\qquad \\hat r_{p,t}=r_f+\\hat\\alpha_t+\\hat\\beta_t(r_{m,t}-r_f)')
+ st.latex(r'VaR^{hist}_{.95,t}=Q_{.05}(r_{p,t-52:t-1})')
+ st.latex(r'VaR^{param}_{.95,t}=\\hat\\mu_t+z_{.05}\\hat\\sigma_t,\\qquad z_{.05}=-1.64485')
+ st.latex(r'\\sigma_t^2=\\omega+\\alpha\\epsilon_{t-1}^2+\\beta\\sigma_{t-1}^2,\\qquad VaR^{GARCH}_{.95,t}=\\hat\\mu_t+z_{.05}\\hat\\sigma_t')
+ st.write('Every estimate is fit only on the preceding 52 weekly observations and evaluated on the next held-out week. Historical VaR is empirical; Parametric VaR assumes normal weekly returns; GARCH uses a GARCH(1,1) conditional variance with normal innovations. The displayed breach rate is compared with the nominal 5% rate.')
+ st.header('24. Complete configured metric output')
  st.dataframe(metric_table(met),hide_index=True,use_container_width=True)
 
 @st.dialog('Full Data Audit',width='large')
@@ -579,6 +637,11 @@ def show_audit_report():
  if not scenario_df.empty:
   for _,r0 in scenario_df.iterrows():
    n=int(r0.get('Historical Events',0)); add('Macro scenarios',str(r0.get('Scenario','Scenario'))+' event count','PASS' if n>=10 else ('WARNING' if n>=3 else 'FAIL'),f'{n} independent historical event(s)')
+ if 'wf' in globals():
+  add('Walk-forward','52-week OOS sample','PASS' if len(wf)>=52 else ('WARNING' if len(wf)>0 else 'FAIL'),f'{len(wf)} held-out weekly validation observations')
+  if not wf.empty:
+   nv=int(wf['VaR 95%'].notna().sum()); add('Walk-forward','VaR estimates available','PASS' if nv==len(wf) else 'WARNING',f'{nv}/{len(wf)} one-step VaR estimates available using {wf_method}')
+   nb=int(wf['CAPM Forecast'].notna().sum()); add('Walk-forward','CAPM estimates available','PASS' if nb==len(wf) else 'WARNING',f'{nb}/{len(wf)} one-step CAPM forecasts available')
  if 'STXGVI.JO' in ASSETS: add('Source validation','STXGVI cents/ZAR normalisation','PASS','normalisation and distribution sanity checks completed before portfolio construction')
  if 'GOVI' in ASSETS: add('Source validation','GOVI repository history','PASS' if len(govi)>=100 else 'FAIL',f'{len(govi)} repository observations; last={govi.index.max():%Y-%m-%d}')
  audit=pd.DataFrame(checks); rank={'PASS':0,'WARNING':1,'FAIL':2}; worst=max((rank[x] for x in audit.Status),default=0); overall=['PASS','WARNING','FAIL'][worst]
