@@ -403,7 +403,7 @@ st.divider(); st.subheader('Macro Risk & Historical Scenario Analysis')
 st.caption('Historical event analysis: portfolio performance is measured over the same realised market interval as each stress event. Results are event returns, not annualised hypothetical forecasts.')
 bench_label=st.session_state.get('benchmark_name',BENCHMARK)
 sc1,sc2,sc3,sc4,sc5=st.columns(5)
-with sc1: use_bench=st.toggle(f'{BENCHMARK} −10% Drawdown',value=True,key='macro_benchmark')
+with sc1: use_bench=st.toggle(f'Benchmark −10% Drawdown ({bench_label} — {BENCHMARK})',value=True,key='macro_benchmark')
 with sc2: use_oil=st.toggle('Oil +3σ Shock',value=False,key='macro_oil')
 with sc3: use_vix=st.toggle('VIX +2σ Shock',value=False,key='macro_vix')
 with sc4: use_move=st.toggle('MOVE +1.5σ Shock',value=False,key='macro_move')
@@ -411,7 +411,7 @@ with sc5: use_hyoas=st.toggle('US HY OAS +2σ Widening',value=False,key='macro_h
 scenario_rows=[]; macro_factor_meta=[]
 if use_bench:
  scenario_rows.append(benchmark_scenario_stats(vals,bp,RF,ppy,BENCHMARK))
- macro_factor_meta.append({'Scenario':f'{BENCHMARK} −10% Drawdown','Factor':BENCHMARK,'Event':'previous peak → first crossing of −10% drawdown','Threshold':'≤ −10%'})
+ macro_factor_meta.append({'Scenario':f'Benchmark −10% Drawdown ({bench_label} — {BENCHMARK})','Factor':f'{bench_label} — {BENCHMARK}','Event':'previous peak → first crossing of −10% drawdown','Threshold':'≤ −10%'})
 if use_oil or use_vix or use_move or use_hyoas:
  try:
   mf=load_macro_factors(daily_mode).reindex(prices.index).ffill()
@@ -461,7 +461,7 @@ def show_latex_report():
  st.latex(r'Y=\frac{T_{end}-T_{start}}{365.25},\qquad CAGR=\left(\frac{V_T}{V_0}\right)^{1/Y}-1')
  st.write(f'Current CAGR = {met["CAGR"]:.6%}; elapsed observations = {len(prices)}.')
  st.header('6. Volatility and risk-free transformation')
- st.latex(r'N=252\ \text{(daily)}\quad\text{or}\quad N=12\ \text{(month-end)}')
+ st.latex(r'N=52\ \text{(weekly)}')
  st.latex(r'\sigma_{ann}=s(r_p)\sqrt{N}')
  st.latex(r'r_{f}=\left(1+R_f\right)^{1/N}-1,\qquad e_t=r_{p,t}-r_f')
  st.write(f'Current N={ppy}; annual RF={RF:.6%}; periodic RF={(1+RF)**(1/ppy)-1:.8%}; annualised volatility={met["Annualised Volatility"]:.6%}.')
@@ -530,7 +530,8 @@ def show_latex_report():
  st.header('22. Macro risk and conditional performance')
  st.latex(r'\Delta F_t=F_t/F_{t-1}-1,\qquad z_t=\frac{\Delta F_t-\overline{\Delta F}}{s(\Delta F)}')
  st.latex(r'\mathcal S_{Oil}=\{t:z^{Oil}_t\ge2\},\quad \mathcal S_{VIX}=\{t:z^{VIX}_t\ge2\},\quad \mathcal S_{MOVE}=\{t:z^{MOVE}_t\ge1.5\}')
- st.latex(r'\mathcal S_{JSE}=\{t:DD^{JSE}_t\le-10\%\}')
+ st.latex(r'\mathcal S_{B}=\{t:DD^{B}_t\le-10\%\}')
+ st.write(f'Here B is the configured benchmark: {bench_label} — {BENCHMARK}.')
  st.latex(r'R_{p|S}=\prod_{t\in\mathcal S}(1+r_{p,t})-1,\qquad \bar r_{p|S}=\frac{1}{|\mathcal S|}\sum_{t\in\mathcal S}r_{p,t}')
  st.latex(r'\sigma_{p|S}=s(r_p\mid t\in\mathcal S)\sqrt N')
  st.latex(r'\beta_{S}=\frac{Cov(r_p-r_f,r_m-r_f\mid t\in\mathcal S)}{Var(r_m-r_f\mid t\in\mathcal S)}')
