@@ -26,16 +26,21 @@ s=s.replace("if not daily_mode: hx=hx.resample('ME').last()","if not daily_mode:
 s=s.replace("fx=fp[pair].reindex(prices.index).ffill()","fx=fp[pair].resample('W-FRI').last().reindex(prices.index)")
 p.write_text(s)
 
-# Force the current architecture patch whenever optional-benchmark support is absent.
 s=Path('app.py').read_text()
 if "USE_BENCHMARK=st.toggle('Use benchmark'" not in s or "benchmark_overlap_start=max(prices.index.min(),bench_valid.index.min())" not in s:
     runpy.run_path('scripts/expand_history_walkforward.py', run_name='__main__')
+
+# Force final requested feature layer when absent. This explicit marker avoids the
+# previous workflow problem where a generic existing marker caused a patch to skip.
+s=Path('app.py').read_text()
+if "Portfolio leverage (x)" not in s or "Correlation measure" not in s or "Negative weight = short position" not in s:
+    runpy.run_path('scripts/final_short_leverage_spearman_patch.py', run_name='__main__')
 
 s=p.read_text()
 assert '.orca-hero{' in s and "ORCA'S" in s
 for forbidden in ['.stApp{','[data-testid="stHeader"]{','[data-testid="stToolbar"]{','[data-testid="stMetric"]{','.stButton>button{']:
     assert forbidden not in s, forbidden
-for required in ["st.segmented_control('Currency'","Complete audit checks","Benchmark (optional)","USE_BENCHMARK=st.toggle('Use benchmark'","Oil +3σ Shock","US HY OAS +2σ Widening","Beta vs Benchmark","Pearson Correlation Matrix","Show LaTeX","observation_date","interval='1d'","ppy=52","roll_n=52; sharpe_n=156","period='max'","Walk-Forward Validator — 52-Week Estimation Window","GARCH(1,1)","mutual_daily=daily_px.dropna(how='any')","benchmark_overlap_start=max(prices.index.min(),bench_valid.index.min())","Only those benchmark-dependent observations are dropped","Portfolio history begins","walk_forward_validation(vals,market_r if USE_BENCHMARK else None"]:
+for required in ["st.segmented_control('Currency'","Complete audit checks","Benchmark (optional)","USE_BENCHMARK=st.toggle('Use benchmark'","Oil +3σ Shock","US HY OAS +2σ Widening","Beta vs Benchmark","Show LaTeX","observation_date","interval='1d'","ppy=52","roll_n=52; sharpe_n=156","period='max'","Walk-Forward Validator — 52-Week Estimation Window","GARCH(1,1)","mutual_daily=daily_px.dropna(how='any')","benchmark_overlap_start=max(prices.index.min(),bench_valid.index.min())","Only those benchmark-dependent observations are dropped","Portfolio history begins","walk_forward_validation(vals,market_r if USE_BENCHMARK else None","Negative weight = short position","Portfolio leverage (x)","Annual leverage / financing cost (%)","Correlation measure","['Pearson','Spearman']","corr(method=corr_method.lower())","levered_r=LEVERAGE*base_r-(LEVERAGE-1.0)*weekly_financing","Not financial advice. Outputs are for research/informational purposes only and are subject to revision."]:
     assert required in s, required
 assert "auto_adjust=False,actions=True" in s
 assert "['Adj Close']" not in s and '[\"Adj Close\"]' not in s
@@ -43,3 +48,4 @@ assert 'START="2012-02-01"' not in s
 assert 'dropped_asset_weeks' not in s
 assert "aligned_index=prices.index.intersection" not in s
 assert "benchmark_missing_weeks=int(bp_all.reindex(prices.index).isna().sum())" not in s
+assert "st.number_input(f'{a0} (%)',0.0,100.0" not in s
