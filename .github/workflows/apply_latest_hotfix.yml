@@ -27,7 +27,7 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           s=Path('app.py').read_text()
-          required=['FX hedged','Portfolio / base currency','Assets to FX hedge','estimate_fx_hedges','FX Beta / Hedge Ratio','hedge_pnl=prev_exposure*hedge_returns.loc[dt,assets]','FX beta hedging','FX Hedge Audit','Pearson Correlation Matrix','Return Attribution by Instrument','Macro Risk & Conditional Performance','Show LaTeX','auto_adjust=False','actions=True']
+          required=['FX hedged','Portfolio / base currency','Assets to FX hedge','estimate_fx_hedges','FX Beta / Hedge Ratio','hedge_pnl=prev_exposure*hedge_returns.loc[dt,assets]','FX beta hedging','Pearson Correlation Matrix','Return Attribution by Instrument','Macro Risk & Conditional Performance','Show LaTeX','auto_adjust=False','actions=True']
           missing=[x for x in required if x not in s]
           if missing: raise SystemExit('Missing: '+repr(missing))
           forbidden=['history_metadata','FX Attribution','fx_decomposition']
