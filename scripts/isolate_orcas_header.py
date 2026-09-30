@@ -32,13 +32,20 @@ s=s.replace("if not daily_mode: x=x.resample('ME').last()","if not daily_mode: x
 s=s.replace("if not daily_mode: hx=hx.resample('ME').last()","if not daily_mode: hx=hx.resample('W-FRI').last()")
 # FX hedge factors need the same weekly price convention.
 s=s.replace("fx=fp[pair].reindex(prices.index).ffill()","fx=fp[pair].resample('W-FRI').last().reindex(prices.index)")
+# Macro benchmark stress must always follow the benchmark chosen in configuration, never a hard-coded JSE label.
+s=s.replace("with sc1: use_bench=st.toggle(f'{BENCHMARK} −10% Drawdown',value=True,key='macro_benchmark')","with sc1: use_bench=st.toggle(f'Benchmark −10% Drawdown ({bench_label} — {BENCHMARK})',value=True,key='macro_benchmark')")
+s=s.replace("macro_factor_meta.append({'Scenario':f'{BENCHMARK} −10% Drawdown','Factor':BENCHMARK,'Event':'previous peak → first crossing of −10% drawdown','Threshold':'≤ −10%'})","macro_factor_meta.append({'Scenario':f'Benchmark −10% Drawdown ({bench_label} — {BENCHMARK})','Factor':f'{bench_label} — {BENCHMARK}','Event':'previous peak → first crossing of −10% drawdown','Threshold':'≤ −10%'})")
+# LaTeX must describe the selected benchmark generically, not JSE.
+s=s.replace("st.latex(r'\\mathcal S_{JSE}=\\{t:DD^{JSE}_t\\le-10\\%\\}')","st.latex(r'\\mathcal S_{B}=\\{t:DD^{B}_t\\le-10\\%\\}')\n st.write(f'Here B is the configured benchmark: {bench_label} — {BENCHMARK}.')")
+# Weekly annualisation documentation.
+s=s.replace("st.latex(r'N=252\\ \\text{(daily)}\\quad\\text{or}\\quad N=12\\ \\text{(month-end)}')","st.latex(r'N=52\\ \\text{(weekly)}')")
 p.write_text(s)
 
 s=p.read_text()
 assert '.orca-hero{' in s and "ORCA'S" in s
 for forbidden in ['.stApp{','[data-testid="stHeader"]{','[data-testid="stToolbar"]{','[data-testid="stMetric"]{','.stButton>button{']:
     assert forbidden not in s, forbidden
-for required in ["st.segmented_control('Currency'","Complete audit checks","Search benchmark","Oil +3σ Shock","US HY OAS +2σ Widening","benchmark_scenario_stats","Beta vs Benchmark","Benchmark={BENCHMARK}","Pearson Correlation Matrix","Show LaTeX","observation_date","interval='1d'","resample('W-FRI').last()","resample('W-FRI').sum()","ppy=52","roll_n=52; sharpe_n=156","weekly (Friday-labelled; last available trading close)"]:
+for required in ["st.segmented_control('Currency'","Complete audit checks","Search benchmark","Oil +3σ Shock","US HY OAS +2σ Widening","benchmark_scenario_stats","Beta vs Benchmark","Benchmark={BENCHMARK}","Pearson Correlation Matrix","Show LaTeX","observation_date","interval='1d'","resample('W-FRI').last()","resample('W-FRI').sum()","ppy=52","roll_n=52; sharpe_n=156","weekly (Friday-labelled; last available trading close)","Benchmark −10% Drawdown ({bench_label} — {BENCHMARK})","\\mathcal S_{B}"]:
     assert required in s, required
 # Methodology invariant: raw Close/actions, never Adj Close or auto-adjusted price history.
 assert "auto_adjust=False,actions=True" in s
