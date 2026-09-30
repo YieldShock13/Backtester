@@ -73,6 +73,23 @@ def search_assets(query):
   if row['symbol'] not in seen: clean.append(row); seen.add(row['symbol'])
  return clean
 
+@st.cache_data(ttl=3600,show_spinner=False)
+def resolve_instrument_names(symbols):
+ names={}
+ for symbol in symbols:
+  if symbol=='GOVI':
+   names[symbol]='South African Government Bond Index'
+   continue
+  try:
+   srch=yf.Search(symbol,max_results=8,news_count=0,lists_count=0,recommended=0)
+   quotes=getattr(srch,'quotes',None) or []
+   exact=next((q for q in quotes if str(q.get('symbol','')).upper()==symbol.upper()),None)
+   q=exact or (quotes[0] if quotes else {})
+   names[symbol]=str(q.get('longname') or q.get('shortname') or symbol)
+  except Exception:
+   names[symbol]=symbol
+ return names
+
 def build_master(selected):
  yahoo=[x for x in selected if x!='GOVI']; yp,yd,ys=load_ticker_components(tuple(yahoo)) if yahoo else ({},{},{})
  if yahoo:
@@ -164,12 +181,15 @@ if 'selected_assets' not in st.session_state: st.session_state.selected_assets=D
 st.markdown('**Assets**')
 search_query=st.text_input('Search asset',placeholder='Search by company, fund, index or ticker')
 results=search_assets(search_query) if search_query.strip() else []
+if 'asset_names' not in st.session_state: st.session_state.asset_names={}
 if results:
- labels=[f"{r['name']} | {r['symbol']} | {r['source']}" for r in results]
- chosen_label=st.selectbox('Search results',labels,key='asset_search_result')
- chosen=results[labels.index(chosen_label)]['symbol']
- if st.button('Add asset',key='add_asset') and chosen not in st.session_state.selected_assets:
-  st.session_state.selected_assets.append(chosen); st.rerun()
+ labels=[f"{r['name']} — {r['symbol']}" for r in results]
+ picked=st.pills('Search results',options=range(len(results)),format_func=lambda i: labels[i],selection_mode='single',key='asset_search_pick')
+ if picked is not None:
+  row=results[picked]; symbol=row['symbol']
+  st.session_state.asset_names[symbol]=row['name']
+  if symbol not in st.session_state.selected_assets:
+   st.session_state.selected_assets.append(symbol); st.rerun()
 ASSETS=st.multiselect('Selected assets',options=list(dict.fromkeys(st.session_state.selected_assets+DEFAULT_TICKERS+['GOVI'])),default=st.session_state.selected_assets,key='selected_assets_widget')
 st.session_state.selected_assets=ASSETS
 if not ASSETS: st.error('Select at least one asset.'); st.stop()
@@ -204,11 +224,12 @@ st.subheader(f'{mode} Annual Total Returns'); ar=annual_returns(vals); ar['Annua
 st.subheader('Annual Total Return by Ticker'); aar=annual_asset_returns(prices,divs,ASSETS)
 for c0 in ASSETS: aar[c0]=aar[c0].map(lambda x:f'{x:.2%}' if pd.notna(x) else 'N/A')
 st.dataframe(aar,hide_index=True,use_container_width=True)
-st.subheader('Return Attribution by Ticker — Capital Gain vs Income'); attr=[]
+st.subheader('Return Attribution by Instrument — Capital Gain vs Income'); attr=[]
+instrument_names=resolve_instrument_names(tuple(ASSETS)); instrument_names.update(st.session_state.get('asset_names',{}))
 for a0 in ASSETS:
- p0=float(prices[a0].iloc[0]); p1=float(prices[a0].iloc[-1]); cap=(p1-p0)/p0; inc=float(divs[a0].iloc[1:].sum())/p0; total=cap+inc; attr.append({'Ticker':a0,'Total Return':total,'Capital Gain':cap,'Income / Distributions':inc,'Capital Gain % of Total':cap/total if not np.isclose(total,0) else np.nan,'Income % of Total':inc/total if not np.isclose(total,0) else np.nan})
+ p0=float(prices[a0].iloc[0]); p1=float(prices[a0].iloc[-1]); cap=(p1-p0)/p0; inc=float(divs[a0].iloc[1:].sum())/p0; total=cap+inc; attr.append({'Instrument':instrument_names.get(a0,a0),'Ticker / Series':a0,'Total Return':total,'Capital Gain':cap,'Income / Distributions':inc,'Capital Gain % of Total':cap/total if not np.isclose(total,0) else np.nan,'Income % of Total':inc/total if not np.isclose(total,0) else np.nan})
 at=pd.DataFrame(attr)
-for c0 in at.columns[1:]: at[c0]=at[c0].map(lambda x:f'{x:.2%}' if pd.notna(x) else 'N/A')
+for c0 in ['Total Return','Capital Gain','Income / Distributions','Capital Gain % of Total','Income % of Total']: at[c0]=at[c0].map(lambda x:f'{x:.2%}' if pd.notna(x) else 'N/A')
 st.dataframe(at,hide_index=True,use_container_width=True)
 weights_end=vals[ASSETS].div(vals.PORTFOLIO,axis=0); wt=pd.DataFrame({'Ticker':ASSETS,'Initial Weight':[weights[a0] for a0 in ASSETS],'Ending Weight':weights_end.iloc[-1].values}); wt['Initial Weight']=wt['Initial Weight'].map(lambda x:f'{x:.2%}'); wt['Ending Weight']=wt['Ending Weight'].map(lambda x:f'{x:.2%}'); st.subheader(f'{mode} Portfolio Weights'); st.dataframe(wt,hide_index=True,use_container_width=True)
 st.divider(); st.subheader('Asset Correlation'); corr=asset_r[ASSETS].dropna().corr(); mask=np.triu(np.ones(corr.shape,dtype=bool),k=1); net_corr=float(corr.where(mask).stack().mean()) if len(corr)>1 else np.nan; st.metric('Net Inter-Asset Correlation','N/A' if not np.isfinite(net_corr) else f'{net_corr:.3f}'); heat=go.Figure(data=go.Heatmap(z=corr.values,x=corr.columns,y=corr.index,zmin=-1,zmax=1,zmid=0,colorscale='RdBu',reversescale=True,text=np.round(corr.values,2),texttemplate='%{text:.2f}')); heat.update_layout(title='Pearson Correlation Matrix'); st.plotly_chart(heat,use_container_width=True)
@@ -216,7 +237,63 @@ st.divider(); st.subheader(f'{mode} — Beta & Alpha Evolution vs {BENCHMARK_TIC
 
 @st.dialog('Full Calculation Workings',width='large')
 def show_latex_report():
- st.header('Data & total-return construction'); st.write('For market instruments, the selected source identifier is used with raw Close plus explicit Dividends. Repository series use their native validated fields. Adjusted Close is not used and no FX overlay is applied.'); st.latex(r'r_{a,t}=\frac{P_{a,t}-P_{a,t-1}+D_{a,t}}{P_{a,t-1}}'); st.latex(r'R^{hold}_{a}=\frac{P_{a,T}-P_{a,0}+\sum D_{a,t}}{P_{a,0}}'); st.latex(r'R^{hold}_{a}=R^{capital}_{a}+R^{income}_{a}'); st.latex(r'CapitalShare_a=R^{capital}_a/R^{hold}_a,\quad IncomeShare_a=R^{income}_a/R^{hold}_a'); st.header('Portfolio construction'); st.latex(r'n_{a,0}=\frac{w_a V_0}{P_{a,0}}'); st.latex(r'V_t=\sum_a V_{a,t}')
+ st.title('Complete Calculation Workings')
+ st.caption(f'Current run: {prices.index[0]:%Y-%m-%d} to {prices.index[-1]:%Y-%m-%d} | {frequency} | RF={RF:.4%} | observations={len(prices)}')
+ st.header('1. Raw data and reconstructed instrument return')
+ st.write('Market instruments: raw Close plus explicit Dividends and Stock Splits from the market-data adapter with auto_adjust=False. Adjusted Close is never used. GOVI uses its validated repository series. No FX overlay is applied.')
+ st.latex(r'r_{a,t}=\frac{P_{a,t}-P_{a,t-1}+D_{a,t}}{P_{a,t-1}}')
+ st.latex(r'R^{capital}_a=\frac{P_{a,T}-P_{a,0}}{P_{a,0}},\quad R^{income}_a=\frac{\sum_{t=1}^{T}D_{a,t}}{P_{a,0}}')
+ st.latex(r'R^{total}_a=R^{capital}_a+R^{income}_a')
+ st.latex(r'CapitalShare_a=R^{capital}_a/R^{total}_a,\quad IncomeShare_a=R^{income}_a/R^{total}_a')
+ st.write('Split events are captured explicitly; STXGVI additionally applies the validated cents/ZAR unit normalisation before returns are reconstructed.')
+ st.header('2. Portfolio construction, income and rebalancing')
+ st.latex(r'A_{a,0}=w_aV_0,\quad n_{a,0}=A_{a,0}/P_{a,0}')
+ st.latex(r'Income_{a,t}=n_{a,t-1}D_{a,t}')
+ st.latex(r'n_{a,t}=n_{a,t-1}+Income_{a,t}/P_{a,t}\quad\text{if reinvested}')
+ st.latex(r'C_{a,t}=C_{a,t-1}+Income_{a,t}\quad\text{if retained as cash}')
+ st.latex(r'V_{a,t}=n_{a,t}P_{a,t}+C_{a,t},\quad V_t=\sum_aV_{a,t}')
+ st.latex(r'n_{a,t^-}=\frac{w_aV_{t^-}}{P_{a,t^-}}\quad\text{at annual rebalance}')
+ st.header('3. Portfolio returns and annual returns')
+ st.latex(r'r_{p,t}=V_t/V_{t-1}-1,\quad R_{p,[0,T]}=V_T/V_0-1')
+ st.latex(r'R_{p,y}=V_{y,end}/V_{y,start}-1')
+ st.latex(r'R_{a,y}=\frac{P_{a,end}-P_{a,start}+\sum D_{a,t}}{P_{a,start}}')
+ st.header('4. CAGR, volatility and risk-free conversion')
+ st.latex(r'CAGR=(V_T/V_0)^{1/Y}-1')
+ st.latex(r'\sigma_{ann}=sd(r_{p,t})\sqrt{N},\quad N\in\{252,12\}')
+ st.latex(r'r_{f,period}=(1+R_f)^{1/N}-1')
+ st.header('5. Sharpe, downside volatility and Sortino')
+ st.latex(r'e_t=r_{p,t}-r_{f,period}')
+ st.latex(r'Sharpe=\frac{\bar e}{sd(e)}\sqrt{N}')
+ st.latex(r'\sigma_{down}=\sqrt{mean(e_t^2\mid e_t<0)}\sqrt{N}')
+ st.latex(r'Sortino=\frac{\bar e N}{\sigma_{down}}')
+ st.header('6. Drawdown and Calmar')
+ st.latex(r'DD_t=V_t/\max_{s\le t}V_s-1,\quad MDD=\min_t DD_t')
+ st.latex(r'Calmar=CAGR/|MDD|')
+ st.header('7. Historical VaR, CVaR and distribution diagnostics')
+ st.latex(r'VaR_{95}=Q_{0.05}(r_p)')
+ st.latex(r'CVaR_{95}=E[r_p\mid r_p\le VaR_{95}]')
+ st.latex(r'Best=\max r_p,\quad Worst=\min r_p,\quad PositiveShare=\frac{\#(r_p>0)}{\#r_p}')
+ st.header('8. Rolling analytics')
+ st.latex(r'R^{roll}_{1Y,t}=\prod_{i=t-L+1}^{t}(1+r_{p,i})-1')
+ st.latex(r'\sigma^{roll}_{1Y,t}=sd(r_{p,t-L+1:t})\sqrt{N}')
+ st.latex(r'Sharpe^{roll}_{3Y,t}=\frac{mean(e_{t-W+1:t})}{sd(e_{t-W+1:t})}\sqrt{N}')
+ st.write(f'Current windows: 1Y L={roll_n} observations; 3Y Sharpe W={sharpe_n} observations.')
+ st.header('9. Portfolio weights and drift')
+ st.latex(r'w_{a,t}=V_{a,t}/V_t')
+ st.header('10. Pearson correlation matrix')
+ st.latex(r'\rho_{ij}=\frac{Cov(r_i,r_j)}{\sigma_i\sigma_j}')
+ st.latex(r'NetCorrelation=mean(\rho_{ij}),\quad i<j')
+ st.header('11. CAPM beta and alpha')
+ st.latex(r'\beta=\frac{Cov(r_p-r_f,r_m-r_f)}{Var(r_m-r_f)}')
+ st.latex(r'\alpha_{period}=mean(r_p-r_f)-\beta mean(r_m-r_f)')
+ st.latex(r'\alpha_{ann}=(1+\alpha_{period})^N-1')
+ st.write(f'Benchmark used by the page: {BENCHMARK_TICKER}. Rolling CAPM window: {capm_window} observations.')
+ st.header('12. Conditional beta')
+ st.latex(r'DD^m_t=P^m_t/\max_{s\le t}P^m_s-1')
+ st.latex(r'\beta_{cond}=\frac{Cov(r_p,r_m\mid DD^m\le-10\%)}{Var(r_m\mid DD^m\le-10\%)}')
+ st.header('13. Current configured outputs')
+ st.dataframe(metric_table(met),hide_index=True,use_container_width=True)
+ st.dataframe(at,hide_index=True,use_container_width=True)
 
 @st.dialog('Full Data Audit',width='large')
 def show_audit_report():
