@@ -103,7 +103,6 @@ def buy_hold(prices,divs):
  return v,cash
 
 def annual_rebalanced(prices,divs):
- # Dividends stay cash. Rebalancing changes invested units only, at prior year-end prices before the new year's return occurs.
  target=pd.Series(ALLOC,dtype=float)/INITIAL
  units=pd.Series({a:ALLOC[a]/float(prices[a].iloc[0]) for a in ASSETS},dtype=float); cash=pd.Series(0.0,index=ASSETS)
  v=pd.DataFrame(index=prices.index,columns=ASSETS,dtype=float)
@@ -144,10 +143,9 @@ def annual_returns(v):
  for y in years:
   end=v.loc[v.index.year==y,'PORTFOLIO'].iloc[-1]; prior=v.loc[v.index.year<y,'PORTFOLIO']; start=prior.iloc[-1] if len(prior) else v.PORTFOLIO.iloc[0]
   rows.append((y,end/start-1,'Partial Year' if y in [v.index[0].year,v.index[-1].year] else 'Full Year'))
- return pd.DataFrame(rows,columns=['Year','Annual Return','Period'])
+ return pd.DataFrame(rows,columns=['Year','Annual Total Return','Period'])
 
 def annual_asset_returns(prices,divs):
- # Non-reinvested annual holding return: price change + ONLY cash paid during that year, all over prior year-end price.
  rows=[]
  for y in sorted(prices.index.year.unique()):
   idx=prices.index[prices.index.year==y]; enddt=idx[-1]; prior=prices.index[prices.index<idx[0]]
@@ -178,7 +176,7 @@ def conditional_beta(v,market_r,market_price):
  return (s.P-mrf).cov(s.M-mrf)/(s.M-mrf).var(),len(s),s
 
 st.title('Portfolio Backtester')
-st.caption('Raw Yahoo Close only | Cash dividends retained, never reinvested | Yahoo Close already split-normalised | Annual asset returns are non-reinvested holding returns | SA bonds: GOVI through Feb-2026, then STXGVI fixed units + cash distributions | Starting capital R1,202,000 | RF 7%')
+st.caption('Raw Yahoo Close only | Cash dividends retained, never reinvested | Yahoo Close already split-normalised | Annual asset returns are non-reinvested total returns | SA bonds: GOVI through Feb-2026, then STXGVI fixed units + cash distributions | Starting capital R1,202,000 | RF 7%')
 try:
  with st.spinner('Updating and validating market data…'):
   prices,divs,asset_r,govi,bond_validation=build_master(); bh,bh_cash=buy_hold(prices,divs); rb=annual_rebalanced(prices,divs); validate_accounting(prices,divs,asset_r,bh,rb)
@@ -189,15 +187,15 @@ mode=st.radio('Backtest mode',['Buy & Hold','Annual Rebalanced'],horizontal=True
 c1,c2,c3,c4=st.columns(4); c1.metric(f'{mode} Value',f"R{met['Ending Value']:,.0f}"); c2.metric(f'{mode} CAGR',f"{met['CAGR']:.2%}"); c3.metric('Sharpe (7% RF)',f"{met['Sharpe Ratio (RF 7%)']:.3f}"); c4.metric('Max Drawdown',f"{met['Maximum Drawdown']:.2%}")
 st.subheader(f'{mode} Analytics'); st.dataframe(metric_table(met),hide_index=True,use_container_width=True)
 p=vals.PORTFOLIO; r=p.pct_change(fill_method=None).dropna(); growth=p/p.iloc[0]*100; dd=(p/p.cummax()-1)*100; roll_ret=((1+r).rolling(12).apply(np.prod,raw=True)-1)*100; roll_vol=r.rolling(12).std()*np.sqrt(12)*100; ex=r-((1+RF)**(1/12)-1); roll_sr=ex.rolling(36).mean()/ex.rolling(36).std()*np.sqrt(12)
-line_chart({mode:p},f'{mode} — Portfolio Value','ZAR'); line_chart({mode:growth},f'{mode} — Growth of R100','Value'); line_chart({'Drawdown':dd},f'{mode} — Portfolio Drawdown','%'); bar=go.Figure(go.Bar(x=r.index,y=r.values*100)); bar.update_layout(title=f'{mode} — Monthly Portfolio Returns',yaxis_title='Return (%)'); st.plotly_chart(bar,use_container_width=True); line_chart({'12M Return':roll_ret},f'{mode} — Rolling 12-Month Return','%'); line_chart({'12M Volatility':roll_vol},f'{mode} — Rolling 12-Month Annualised Volatility','%'); line_chart({'36M Sharpe':roll_sr},f'{mode} — Rolling 36-Month Sharpe Ratio — RF 7%','Sharpe'); line_chart({c:vals[c] for c in ASSETS},f'{mode} — Portfolio Sleeve Values','ZAR')
-st.subheader(f'{mode} Annual Returns'); ar=annual_returns(vals); ar['Annual Return']=ar['Annual Return'].map(lambda x:f'{x:.2%}'); st.dataframe(ar,hide_index=True,use_container_width=True)
-st.subheader('Annual Return by Asset'); aar=annual_asset_returns(prices,divs)
+line_chart({mode:p},f'{mode} — Portfolio Value','ZAR'); line_chart({mode:growth},f'{mode} — Growth of R100','Value'); line_chart({'Drawdown':dd},f'{mode} — Portfolio Drawdown','%'); bar=go.Figure(go.Bar(x=r.index,y=r.values*100)); bar.update_layout(title=f'{mode} — Monthly Portfolio Total Returns',yaxis_title='Total Return (%)'); st.plotly_chart(bar,use_container_width=True); line_chart({'12M Total Return':roll_ret},f'{mode} — Rolling 12-Month Total Return','%'); line_chart({'12M Volatility':roll_vol},f'{mode} — Rolling 12-Month Annualised Volatility','%'); line_chart({'36M Sharpe':roll_sr},f'{mode} — Rolling 36-Month Sharpe Ratio — RF 7%','Sharpe'); line_chart({c:vals[c] for c in ASSETS},f'{mode} — Portfolio Sleeve Values','ZAR')
+st.subheader(f'{mode} Annual Total Returns'); ar=annual_returns(vals); ar['Annual Total Return']=ar['Annual Total Return'].map(lambda x:f'{x:.2%}'); st.dataframe(ar,hide_index=True,use_container_width=True)
+st.subheader('Annual Total Return by Asset Class'); aar=annual_asset_returns(prices,divs)
 for c in ASSETS: aar[c]=aar[c].map(lambda x:f'{x:.2%}' if pd.notna(x) else 'N/A')
 st.dataframe(aar,hide_index=True,use_container_width=True)
 weights=vals[ASSETS].div(vals.PORTFOLIO,axis=0); wt=pd.DataFrame({'Asset':ASSETS,'Initial Weight':[ALLOC[a]/INITIAL for a in ASSETS],'Ending Weight':weights.iloc[-1].values}); wt['Initial Weight']=wt['Initial Weight'].map(lambda x:f'{x:.2%}'); wt['Ending Weight']=wt['Ending Weight'].map(lambda x:f'{x:.2%}'); st.subheader(f'{mode} Portfolio Weights'); st.dataframe(wt,hide_index=True,use_container_width=True)
 st.divider(); st.subheader('Buy & Hold vs Annual Rebalancing'); line_chart({'Buy & Hold':bh.PORTFOLIO,'Annual Rebalanced':rb.PORTFOLIO},'Portfolio Value Comparison','ZAR'); st.dataframe(pd.DataFrame({'Buy & Hold':metric_table(bhm).set_index('Metric').Value,'Annual Rebalanced':metric_table(rbm).set_index('Metric').Value}),use_container_width=True)
 with st.expander('Methodology & data'):
  st.write('Raw Close is used, never Adjusted Close. Yahoo Close is already split-normalised, so reported split events are not applied again. Foreign prices and dividends are translated into ZAR. Dividends/distributions remain cash and are never reinvested. Buy & Hold keeps original asset units fixed. Annual Rebalanced changes only invested asset units at the prior calendar year-end; accumulated dividend cash is not used to buy assets.')
- st.write('Annual asset return is calculated directly as (year-end price − prior year-end price + cash distributions paid during the year) / prior year-end price. This does not compound or reinvest monthly dividends. SA bonds use repository GOVI through February 2026; thereafter fixed STXGVI units extend the price component and STXGVI distributions are tracked separately as cash.')
+ st.write('Annual asset total return is calculated directly as (year-end price − prior year-end price + cash distributions paid during the year) / prior year-end price. This does not compound or reinvest monthly dividends. SA bonds use repository GOVI through February 2026; thereafter fixed STXGVI units extend the price component and STXGVI distributions are tracked separately as cash.')
 st.divider(); st.subheader('Asset Correlation'); corr=asset_r[ASSETS].dropna().corr(); mask=np.triu(np.ones(corr.shape,dtype=bool),k=1); net_corr=float(corr.where(mask).stack().mean()); st.metric('Net Inter-Asset Correlation',f'{net_corr:.3f}'); heat=go.Figure(data=go.Heatmap(z=corr.values,x=corr.columns,y=corr.index,zmin=-1,zmax=1,zmid=0,colorscale='RdBu',reversescale=True,text=np.round(corr.values,2),texttemplate='%{text:.2f}')); heat.update_layout(title='Pearson Correlation Matrix'); st.plotly_chart(heat,use_container_width=True)
 st.divider(); st.subheader(f'{mode} — Beta & Alpha Evolution vs ALSI'); roll_beta,roll_alpha=rolling_capm(vals,market_r); line_chart({'36M Rolling Beta':roll_beta},f'{mode} — 36-Month Rolling Beta vs ALSI','Beta'); line_chart({'36M Rolling Alpha':roll_alpha*100},f'{mode} — 36-Month Rolling Annualised CAPM Alpha','Alpha (%)'); cb,nobs,stress=conditional_beta(vals,market_r,prices['ALSI']); st.metric('Conditional Beta — ALSI Drawdown ≥10%', 'N/A' if not np.isfinite(cb) else f'{cb:.3f}'); st.caption(f'Conditional beta estimated using {nobs} monthly observations where ALSI was at least 10% below its prior peak.')
