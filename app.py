@@ -239,6 +239,12 @@ def load_macro_factors(daily_mode):
   x=yp[sym].astype(float).sort_index()
   if not daily_mode: x=x.resample('ME').last()
   out[name]=x.rename(name)
+ # ICE BofA US High Yield Index Option-Adjusted Spread (FRED BAMLH0A0HYM2), percent.
+ hy=pd.read_csv('https://fred.stlouisfed.org/graph/fredgraph.csv?id=BAMLH0A0HYM2')
+ hy['DATE']=pd.to_datetime(hy['DATE']); hy['BAMLH0A0HYM2']=pd.to_numeric(hy['BAMLH0A0HYM2'],errors='coerce')
+ hx=hy.set_index('DATE')['BAMLH0A0HYM2'].dropna().sort_index()
+ if not daily_mode: hx=hx.resample('ME').last()
+ out['HY OAS']=hx.rename('HY OAS')
  return pd.DataFrame(out)
 
 def _conditional_capm(period_returns,market_returns,rf,ppy):
@@ -247,7 +253,7 @@ def _conditional_capm(period_returns,market_returns,rf,ppy):
  rfp=(1+rf)**(1/ppy)-1; x=d.M-rfp; y=d.P-rfp; beta=y.cov(x)/x.var(); alpha=y.mean()-beta*x.mean()
  return beta,alpha,n
 
-def jse_drawdown_events(vals,market_price,threshold=-.10):
+def benchmark_drawdown_events(vals,market_price,threshold=-.10):
  # Independent peak-to-first-threshold-crossing historical episodes. A new event cannot begin until a new high is established.
  p=market_price.dropna().sort_index(); events=[]; peak_date=p.index[0]; peak=float(p.iloc[0]); armed=True
  for dt,px in p.iloc[1:].items():
@@ -261,21 +267,22 @@ def jse_drawdown_events(vals,market_price,threshold=-.10):
    armed=False
  return events
 
-def jse_scenario_stats(vals,market_price,rf,ppy):
- events=jse_drawdown_events(vals,market_price,-.10)
- if not events: return {'Scenario':'JSE −10% Drawdown','Historical Events':0}
- er=pd.DataFrame(events,columns=['Start','End','JSE Event Return','Portfolio Event Return'])
+def benchmark_scenario_stats(vals,market_price,rf,ppy,benchmark_label):
+ events=benchmark_drawdown_events(vals,market_price,-.10)
+ label=f'{benchmark_label} −10% Drawdown'
+ if not events: return {'Scenario':label,'Historical Events':0}
+ er=pd.DataFrame(events,columns=['Start','End','Benchmark Event Return','Portfolio Event Return'])
  # Conditional CAPM uses all underlying periodic observations contained inside the independent event windows.
  rp=vals.PORTFOLIO.pct_change(fill_method=None); rm=market_price.pct_change(fill_method=None); idx=pd.Index([])
  for st,en,_,_ in events: idx=idx.union(rp.index[(rp.index>st)&(rp.index<=en)])
  beta,alpha,n=_conditional_capm(rp.reindex(idx),rm.reindex(idx),rf,ppy)
- return {'Scenario':'JSE −10% Drawdown','Historical Events':len(er),'Avg Portfolio Event Return':er['Portfolio Event Return'].mean(),'Median Portfolio Event Return':er['Portfolio Event Return'].median(),'Avg JSE Event Return':er['JSE Event Return'].mean(),'Worst Portfolio Event':er['Portfolio Event Return'].min(),'Best Portfolio Event':er['Portfolio Event Return'].max(),'Positive Portfolio Events':(er['Portfolio Event Return']>0).mean(),'Conditional Beta':beta,'Conditional Alpha (periodic)':alpha,'CAPM Period Obs':n}
+ return {'Scenario':label,'Historical Events':len(er),'Avg Portfolio Event Return':er['Portfolio Event Return'].mean(),'Median Portfolio Event Return':er['Portfolio Event Return'].median(),'Avg Benchmark Event Return':er['Benchmark Event Return'].mean(),'Worst Portfolio Event':er['Portfolio Event Return'].min(),'Best Portfolio Event':er['Portfolio Event Return'].max(),'Positive Portfolio Events':(er['Portfolio Event Return']>0).mean(),'Conditional Beta':beta,'Conditional Alpha (periodic)':alpha,'CAPM Period Obs':n}
 
 def one_period_shock_stats(vals,market_price,factor_change,threshold,rf,ppy,label):
  rp=vals.PORTFOLIO.pct_change(fill_method=None); rm=market_price.pct_change(fill_method=None)
  d=pd.concat([rp.rename('P'),rm.rename('M'),factor_change.rename('F')],axis=1).dropna(); e=d[d.F>=threshold]
  beta,alpha,n=_conditional_capm(e.P,e.M,rf,ppy)
- return {'Scenario':label,'Historical Events':len(e),'Avg Portfolio Event Return':e.P.mean() if len(e) else np.nan,'Median Portfolio Event Return':e.P.median() if len(e) else np.nan,'Avg JSE Event Return':e.M.mean() if len(e) else np.nan,'Avg Factor Shock':e.F.mean() if len(e) else np.nan,'Worst Portfolio Event':e.P.min() if len(e) else np.nan,'Best Portfolio Event':e.P.max() if len(e) else np.nan,'Positive Portfolio Events':(e.P>0).mean() if len(e) else np.nan,'Conditional Beta':beta,'Conditional Alpha (periodic)':alpha,'CAPM Period Obs':n}
+ return {'Scenario':label,'Historical Events':len(e),'Avg Portfolio Event Return':e.P.mean() if len(e) else np.nan,'Median Portfolio Event Return':e.P.median() if len(e) else np.nan,'Avg Benchmark Event Return':e.M.mean() if len(e) else np.nan,'Avg Factor Shock':e.F.mean() if len(e) else np.nan,'Worst Portfolio Event':e.P.min() if len(e) else np.nan,'Best Portfolio Event':e.P.max() if len(e) else np.nan,'Positive Portfolio Events':(e.P>0).mean() if len(e) else np.nan,'Conditional Beta':beta,'Conditional Alpha (periodic)':alpha,'CAPM Period Obs':n}
 
 title_col, report_col1, report_col2=st.columns([8,1,1])
 with title_col: st.title('Portfolio Backtester')
@@ -310,6 +317,20 @@ if results:
 ASSETS=st.multiselect('Selected assets',options=list(dict.fromkeys(st.session_state.selected_assets+DEFAULT_TICKERS+['GOVI'])),default=st.session_state.selected_assets,key='selected_assets_widget')
 st.session_state.selected_assets=ASSETS
 if not ASSETS: st.error('Select at least one asset.'); st.stop()
+st.markdown('**Benchmark**')
+if 'benchmark_symbol' not in st.session_state: st.session_state.benchmark_symbol=BENCHMARK_TICKER
+if 'benchmark_name' not in st.session_state: st.session_state.benchmark_name='FTSE/JSE All Share Index'
+benchmark_query=st.text_input('Search benchmark',placeholder='Search by index, ETF, fund or ticker',key='benchmark_search_query')
+benchmark_results=search_assets(benchmark_query) if benchmark_query.strip() else []
+if benchmark_results:
+ benchmark_labels=[f"{r['name']} — {r['symbol']}" for r in benchmark_results]
+ def _select_benchmark():
+  picked=st.session_state.get('benchmark_search_pick')
+  if picked is None: return
+  row=benchmark_results[picked]; st.session_state.benchmark_symbol=row['symbol']; st.session_state.benchmark_name=row['name']
+ st.pills('Benchmark search results',options=range(len(benchmark_results)),format_func=lambda i: benchmark_labels[i],selection_mode='single',key='benchmark_search_pick',on_change=_select_benchmark)
+BENCHMARK=st.session_state.benchmark_symbol
+st.caption(f"Selected benchmark: {st.session_state.benchmark_name} — {BENCHMARK}")
 st.markdown('**FX Hedging**')
 fxc1,fxc2=st.columns(2)
 with fxc1: FX_HEDGED=st.toggle('FX hedged',value=False)
@@ -354,7 +375,11 @@ if FX_HEDGED and HEDGED_ASSETS and not fx_hedge_report.empty:
  st.subheader('FX Beta Hedge — In-Sample Estimates'); fxshow=fx_hedge_report.copy(); fxshow['Alpha (periodic)']=fxshow['Alpha (periodic)'].map(lambda x:f'{x:.4%}'); fxshow['FX Beta / Hedge Ratio']=fxshow['FX Beta / Hedge Ratio'].map(lambda x:f'{x:.4f}'); fxshow['R²']=fxshow['R²'].map(lambda x:f'{x:.4f}'); st.dataframe(fxshow,hide_index=True,use_container_width=True)
 if data_flags: st.warning('DATA FLAGS — '+' | '.join(data_flags))
 mode=st.radio('Backtest mode',['Buy & Hold','Annual Rebalanced'],horizontal=True,index=0); vals=bh if mode=='Buy & Hold' else rb
-bench_p,bench_d,_=load_ticker_components((BENCHMARK_TICKER,)); bp=bench_p[BENCHMARK_TICKER].reindex(prices.index).ffill(); bd=bench_d[BENCHMARK_TICKER].reindex(prices.index,fill_value=0.0); market_r=(bp-bp.shift(1)+bd)/bp.shift(1); met=stats(vals,market_r,RF,ppy)
+if BENCHMARK=='GOVI':
+ bp=load_govi_history().reindex(prices.index).ffill(); bd=pd.Series(0.0,index=prices.index)
+else:
+ bench_p,bench_d,_=load_ticker_components((BENCHMARK,)); bp=bench_p[BENCHMARK].reindex(prices.index).ffill(); bd=bench_d[BENCHMARK].reindex(prices.index,fill_value=0.0)
+market_r=(bp-bp.shift(1)+bd)/bp.shift(1); met=stats(vals,market_r,RF,ppy)
 c1,c2,c3,c4=st.columns(4); c1.metric(f'{mode} Value',f"{met['Ending Value']:,.0f}"); c2.metric(f'{mode} CAGR',f"{met['CAGR']:.2%}"); c3.metric(f'Sharpe ({RF:.2%} RF)',f"{met['Sharpe Ratio']:.3f}"); c4.metric('Max Drawdown',f"{met['Maximum Drawdown']:.2%}")
 st.subheader(f'{mode} Analytics'); st.dataframe(metric_table(met),hide_index=True,use_container_width=True)
 p=vals.PORTFOLIO; r=p.pct_change(fill_method=None).dropna(); growth=p/p.iloc[0]*100; dd=(p/p.cummax()-1)*100; roll_n=252 if daily_mode else 12; sharpe_n=756 if daily_mode else 36; roll_ret=((1+r).rolling(roll_n).apply(np.prod,raw=True)-1)*100; roll_vol=r.rolling(roll_n).std()*np.sqrt(ppy)*100; ex=r-((1+RF)**(1/ppy)-1); roll_sr=ex.rolling(sharpe_n).mean()/ex.rolling(sharpe_n).std()*np.sqrt(ppy)
@@ -372,33 +397,36 @@ for c0 in ['Total Return','Capital Gain','Income / Distributions','Capital Gain 
 st.dataframe(at,hide_index=True,use_container_width=True)
 weights_end=vals[ASSETS].div(vals.PORTFOLIO,axis=0); wt=pd.DataFrame({'Ticker':ASSETS,'Initial Weight':[weights[a0] for a0 in ASSETS],'Ending Weight':weights_end.iloc[-1].values}); wt['Initial Weight']=wt['Initial Weight'].map(lambda x:f'{x:.2%}'); wt['Ending Weight']=wt['Ending Weight'].map(lambda x:f'{x:.2%}'); st.subheader(f'{mode} Portfolio Weights'); st.dataframe(wt,hide_index=True,use_container_width=True)
 st.divider(); st.subheader('Asset Correlation'); corr=asset_r[ASSETS].dropna().corr(); mask=np.triu(np.ones(corr.shape,dtype=bool),k=1); net_corr=float(corr.where(mask).stack().mean()) if len(corr)>1 else np.nan; st.metric('Net Inter-Asset Correlation','N/A' if not np.isfinite(net_corr) else f'{net_corr:.3f}'); heat=go.Figure(data=go.Heatmap(z=corr.values,x=corr.columns,y=corr.index,zmin=-1,zmax=1,zmid=0,colorscale='RdBu',reversescale=True,text=np.round(corr.values,2),texttemplate='%{text:.2f}')); heat.update_layout(title='Pearson Correlation Matrix'); st.plotly_chart(heat,use_container_width=True)
-st.divider(); st.subheader(f'{mode} — Beta & Alpha Evolution vs {BENCHMARK_TICKER}'); roll_beta,roll_alpha,capm_window=rolling_capm(vals,market_r,RF,ppy); line_chart({f'{capm_window}-period Rolling Beta':roll_beta},f'{mode} — Rolling Beta vs {BENCHMARK_TICKER}','Beta'); line_chart({f'{capm_window}-period Rolling Alpha':roll_alpha*100},f'{mode} — Rolling Annualised CAPM Alpha','Alpha (%)'); cb,ncb=conditional_beta(vals,bp)
+st.divider(); st.subheader(f'{mode} — Beta & Alpha Evolution vs {BENCHMARK}'); roll_beta,roll_alpha,capm_window=rolling_capm(vals,market_r,RF,ppy); line_chart({f'{capm_window}-period Rolling Beta':roll_beta},f'{mode} — Rolling Beta vs {BENCHMARK}','Beta'); line_chart({f'{capm_window}-period Rolling Alpha':roll_alpha*100},f'{mode} — Rolling Annualised CAPM Alpha','Alpha (%)'); cb,ncb=conditional_beta(vals,bp)
 
 st.divider(); st.subheader('Macro Risk & Historical Scenario Analysis')
 st.caption('Historical event analysis: portfolio performance is measured over the same realised market interval as each stress event. Results are event returns, not annualised hypothetical forecasts.')
-sc1,sc2,sc3,sc4=st.columns(4)
-with sc1: use_jse=st.toggle('JSE −10% Drawdown',value=True,key='macro_jse')
-with sc2: use_oil=st.toggle('Oil +2σ Shock',value=False,key='macro_oil')
+bench_label=st.session_state.get('benchmark_name',BENCHMARK)
+sc1,sc2,sc3,sc4,sc5=st.columns(5)
+with sc1: use_bench=st.toggle(f'{BENCHMARK} −10% Drawdown',value=True,key='macro_benchmark')
+with sc2: use_oil=st.toggle('Oil +3σ Shock',value=False,key='macro_oil')
 with sc3: use_vix=st.toggle('VIX +2σ Shock',value=False,key='macro_vix')
 with sc4: use_move=st.toggle('MOVE +1.5σ Shock',value=False,key='macro_move')
+with sc5: use_hyoas=st.toggle('US HY OAS +2σ Widening',value=False,key='macro_hyoas')
 scenario_rows=[]; macro_factor_meta=[]
-if use_jse:
- scenario_rows.append(jse_scenario_stats(vals,bp,RF,ppy))
- macro_factor_meta.append({'Scenario':'JSE −10% Drawdown','Factor':BENCHMARK_TICKER,'Event':'previous peak → first crossing of −10% drawdown','Threshold':'≤ −10%'})
-if use_oil or use_vix or use_move:
+if use_bench:
+ scenario_rows.append(benchmark_scenario_stats(vals,bp,RF,ppy,BENCHMARK))
+ macro_factor_meta.append({'Scenario':f'{BENCHMARK} −10% Drawdown','Factor':BENCHMARK,'Event':'previous peak → first crossing of −10% drawdown','Threshold':'≤ −10%'})
+if use_oil or use_vix or use_move or use_hyoas:
  try:
   mf=load_macro_factors(daily_mode).reindex(prices.index).ffill()
-  for name,use,zcut,label in [('Oil',use_oil,2.0,'Oil +2σ Shock'),('VIX',use_vix,2.0,'VIX +2σ Shock'),('MOVE',use_move,1.5,'MOVE +1.5σ Shock')]:
+  for name,use,zcut,label,transform in [('Oil',use_oil,3.0,'Oil +3σ Shock','pct'),('VIX',use_vix,2.0,'VIX +2σ Shock','pct'),('MOVE',use_move,1.5,'MOVE +1.5σ Shock','pct'),('HY OAS',use_hyoas,2.0,'US HY OAS +2σ Widening','diff')]:
    if not use: continue
-   chg=mf[name].pct_change(fill_method=None); mu=chg.mean(); sig=chg.std(); threshold=mu+zcut*sig
+   chg=mf[name].diff() if transform=='diff' else mf[name].pct_change(fill_method=None)
+   mu=chg.mean(); sig=chg.std(); threshold=mu+zcut*sig
    scenario_rows.append(one_period_shock_stats(vals,bp,chg,threshold,RF,ppy,label))
-   macro_factor_meta.append({'Scenario':label,'Factor':name,'Event':'single configured observation interval','Transformation':'percentage change','Mean':mu,'Std Dev':sig,'Threshold':threshold})
+   macro_factor_meta.append({'Scenario':label,'Factor':name,'Event':'single configured observation interval','Transformation':'percentage-point change' if transform=='diff' else 'percentage change','Mean':mu,'Std Dev':sig,'Threshold':threshold})
  except Exception as e:
   st.warning(f'Macro factor data unavailable for selected scenario(s): {e}')
 scenario_df=pd.DataFrame(scenario_rows); macro_factor_meta_df=pd.DataFrame(macro_factor_meta)
 if not scenario_df.empty:
  display_scen=scenario_df.copy()
- for c0 in ['Avg Portfolio Event Return','Median Portfolio Event Return','Avg JSE Event Return','Avg Factor Shock','Worst Portfolio Event','Best Portfolio Event','Positive Portfolio Events','Conditional Alpha (periodic)']:
+ for c0 in ['Avg Portfolio Event Return','Median Portfolio Event Return','Avg Benchmark Event Return','Avg Factor Shock','Worst Portfolio Event','Best Portfolio Event','Positive Portfolio Events','Conditional Alpha (periodic)']:
   if c0 in display_scen: display_scen[c0]=display_scen[c0].map(lambda x:f'{x:.2%}' if pd.notna(x) else 'N/A')
  if 'Conditional Beta' in display_scen: display_scen['Conditional Beta']=display_scen['Conditional Beta'].map(lambda x:f'{x:.3f}' if pd.notna(x) else 'N/A')
  st.dataframe(display_scen,hide_index=True,use_container_width=True)
