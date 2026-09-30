@@ -189,7 +189,14 @@ if results:
   row=results[picked]; symbol=row['symbol']
   st.session_state.asset_names[symbol]=row['name']
   if symbol not in st.session_state.selected_assets:
-   st.session_state.selected_assets.append(symbol); st.rerun()
+   st.session_state.selected_assets.append(symbol)
+   # The multiselect is a keyed widget: its existing widget state overrides `default` on rerun.
+   # Synchronise the widget state explicitly so a clicked search result appears immediately.
+   current=list(st.session_state.get('selected_assets_widget',st.session_state.selected_assets))
+   if symbol not in current: current.append(symbol)
+   st.session_state.selected_assets_widget=current
+   st.session_state.asset_search_pick=None
+   st.rerun()
 ASSETS=st.multiselect('Selected assets',options=list(dict.fromkeys(st.session_state.selected_assets+DEFAULT_TICKERS+['GOVI'])),default=st.session_state.selected_assets,key='selected_assets_widget')
 st.session_state.selected_assets=ASSETS
 if not ASSETS: st.error('Select at least one asset.'); st.stop()
