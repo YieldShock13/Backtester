@@ -25,7 +25,7 @@ def load_ticker_components(tickers):
  prices={}; divs={}; splits={}
  for ticker in tickers:
   h=yf.Ticker(ticker).history(start=START,auto_adjust=False,actions=True)
-  if h.empty: raise RuntimeError(f'Yahoo Finance returned no data for exact ticker {ticker}')
+  if h.empty: raise RuntimeError(f'Market-data source returned no data for ticker {ticker}')
   h=h.copy(); h.index=pd.to_datetime(h.index).tz_localize(None); h=h.sort_index()
   close=pd.to_numeric(h['Close'],errors='coerce').dropna()
   div=pd.to_numeric(h.get('Dividends',0.0),errors='coerce').fillna(0.0).reindex(close.index,fill_value=0.0)
@@ -33,6 +33,26 @@ def load_ticker_components(tickers):
   if len(close)<2: raise RuntimeError(f'{ticker}: fewer than two valid Close observations')
   prices[ticker]=close.rename(ticker); divs[ticker]=div.rename(ticker); splits[ticker]=sp.rename(ticker)
  return prices,divs,splits
+
+@st.cache_data(ttl=3600,show_spinner=False)
+def search_assets(query):
+ q=(query or '').strip()
+ if not q: return []
+ out=[]
+ if 'govi' in q.lower() or 'south african government' in q.lower():
+  out.append({'symbol':'GOVI','name':'South African Government Bond Index (repository series)','source':'Repository'})
+ try:
+  srch=yf.Search(q,max_results=12,news_count=0,lists_count=0,recommended=0)
+  for item in (getattr(srch,'quotes',None) or []):
+   symbol=str(item.get('symbol','')).strip()
+   if not symbol: continue
+   out.append({'symbol':symbol,'name':str(item.get('longname') or item.get('shortname') or symbol),'source':'Market data'})
+ except Exception:
+  pass
+ seen=set(); clean=[]
+ for row in out:
+  if row['symbol'] not in seen: clean.append(row); seen.add(row['symbol'])
+ return clean
 
 def build_master(selected):
  yahoo=[x for x in selected if x!='GOVI']; yp,yd,ys=load_ticker_components(tuple(yahoo)) if yahoo else ({},{},{})
@@ -45,7 +65,7 @@ def build_master(selected):
  return mp.loc[START:],md.reindex(mp.index,fill_value=0.0).loc[START:],g,val,ys
 
 def build_daily(selected):
- if 'GOVI' in selected: raise RuntimeError('GOVI is monthly-only. For daily analysis use an explicit investable Yahoo ticker such as STXGVI.JO.')
+ if 'GOVI' in selected: raise RuntimeError('GOVI is monthly-only. For daily analysis select an instrument with daily observations, such as STXGVI.JO.')
  yp,yd,ys=load_ticker_components(tuple(selected)); dp=pd.concat(yp.values(),axis=1); dd=pd.concat(yd.values(),axis=1).reindex(dp.index,fill_value=0.0); g=load_govi_history(); val={'last_govi':g.index.max(),'source':'repository GOVI'}
  return dp,dd,g,val,ys
 
@@ -121,9 +141,19 @@ if timeline=='Custom':
  x,y=st.columns(2)
  with x: custom_start=st.date_input('Custom start',value=pd.Timestamp(START).date())
  with y: custom_end=st.date_input('Custom end',value=pd.Timestamp.today().date())
-ticker_text=st.text_input('Exact Yahoo Finance tickers (comma-separated; GOVI is the repository series)',value=','.join(DEFAULT_TICKERS),help='Any Yahoo Finance ticker may be entered using its exact symbol. No automatic FX overlay is applied.')
-ASSETS=list(dict.fromkeys([x.strip().upper() for x in ticker_text.split(',') if x.strip()]))
-if not ASSETS: st.error('Enter at least one exact ticker.'); st.stop()
+if 'selected_assets' not in st.session_state: st.session_state.selected_assets=DEFAULT_TICKERS.copy()
+st.markdown('**Assets**')
+search_query=st.text_input('Search asset',placeholder='Search by company, fund, index or ticker')
+results=search_assets(search_query) if search_query.strip() else []
+if results:
+ labels=[f"{r['name']} | {r['symbol']} | {r['source']}" for r in results]
+ chosen_label=st.selectbox('Search results',labels,key='asset_search_result')
+ chosen=results[labels.index(chosen_label)]['symbol']
+ if st.button('Add asset',key='add_asset') and chosen not in st.session_state.selected_assets:
+  st.session_state.selected_assets.append(chosen); st.rerun()
+ASSETS=st.multiselect('Selected assets',options=list(dict.fromkeys(st.session_state.selected_assets+DEFAULT_TICKERS+['GOVI'])),default=st.session_state.selected_assets,key='selected_assets_widget')
+st.session_state.selected_assets=ASSETS
+if not ASSETS: st.error('Select at least one asset.'); st.stop()
 st.markdown('**Weights**'); cols=st.columns(3); raww={}; default_sum=sum(DEFAULT_WEIGHTS.get(x,0.0) for x in ASSETS)
 for i,a0 in enumerate(ASSETS):
  default=(DEFAULT_WEIGHTS.get(a0,0.0)/default_sum*100) if default_sum>0 else 100/len(ASSETS)
@@ -162,15 +192,15 @@ at=pd.DataFrame(attr)
 for c0 in at.columns[1:]: at[c0]=at[c0].map(lambda x:f'{x:.2%}' if pd.notna(x) else 'N/A')
 st.dataframe(at,hide_index=True,use_container_width=True)
 weights_end=vals[ASSETS].div(vals.PORTFOLIO,axis=0); wt=pd.DataFrame({'Ticker':ASSETS,'Initial Weight':[weights[a0] for a0 in ASSETS],'Ending Weight':weights_end.iloc[-1].values}); wt['Initial Weight']=wt['Initial Weight'].map(lambda x:f'{x:.2%}'); wt['Ending Weight']=wt['Ending Weight'].map(lambda x:f'{x:.2%}'); st.subheader(f'{mode} Portfolio Weights'); st.dataframe(wt,hide_index=True,use_container_width=True)
-st.divider(); st.subheader('Asset Correlation'); corr=asset_r[ASSETS].dropna().corr(); st.dataframe(corr,use_container_width=True)
+st.divider(); st.subheader('Asset Correlation'); corr=asset_r[ASSETS].dropna().corr(); mask=np.triu(np.ones(corr.shape,dtype=bool),k=1); net_corr=float(corr.where(mask).stack().mean()) if len(corr)>1 else np.nan; st.metric('Net Inter-Asset Correlation','N/A' if not np.isfinite(net_corr) else f'{net_corr:.3f}'); heat=go.Figure(data=go.Heatmap(z=corr.values,x=corr.columns,y=corr.index,zmin=-1,zmax=1,zmid=0,colorscale='RdBu',reversescale=True,text=np.round(corr.values,2),texttemplate='%{text:.2f}')); heat.update_layout(title='Pearson Correlation Matrix'); st.plotly_chart(heat,use_container_width=True)
 st.divider(); st.subheader(f'{mode} — Beta & Alpha Evolution vs {BENCHMARK_TICKER}'); roll_beta,roll_alpha,capm_window=rolling_capm(vals,market_r,RF,ppy); line_chart({f'{capm_window}-period Rolling Beta':roll_beta},f'{mode} — Rolling Beta vs {BENCHMARK_TICKER}','Beta'); line_chart({f'{capm_window}-period Rolling Alpha':roll_alpha*100},f'{mode} — Rolling Annualised CAPM Alpha','Alpha (%)'); cb,ncb=conditional_beta(vals,bp); st.metric(f'Conditional Beta — {BENCHMARK_TICKER} drawdown ≥10%','N/A' if not np.isfinite(cb) else f'{cb:.3f}')
 
 @st.dialog('Full Calculation Workings',width='large')
 def show_latex_report():
- st.header('Data & total-return construction'); st.write('Exact user-entered Yahoo ticker; history(auto_adjust=False, actions=True). Raw Close plus explicit Dividends. Adjusted Close is not used and no FX overlay is applied.'); st.latex(r'r_{a,t}=\frac{P_{a,t}-P_{a,t-1}+D_{a,t}}{P_{a,t-1}}'); st.latex(r'R^{hold}_{a}=\frac{P_{a,T}-P_{a,0}+\sum D_{a,t}}{P_{a,0}}'); st.latex(r'R^{hold}_{a}=R^{capital}_{a}+R^{income}_{a}'); st.latex(r'CapitalShare_a=R^{capital}_a/R^{hold}_a,\quad IncomeShare_a=R^{income}_a/R^{hold}_a'); st.header('Portfolio construction'); st.latex(r'n_{a,0}=\frac{w_a V_0}{P_{a,0}}'); st.latex(r'V_t=\sum_a V_{a,t}')
+ st.header('Data & total-return construction'); st.write('For market instruments, the selected source identifier is used with raw Close plus explicit Dividends. Repository series use their native validated fields. Adjusted Close is not used and no FX overlay is applied.'); st.latex(r'r_{a,t}=\frac{P_{a,t}-P_{a,t-1}+D_{a,t}}{P_{a,t-1}}'); st.latex(r'R^{hold}_{a}=\frac{P_{a,T}-P_{a,0}+\sum D_{a,t}}{P_{a,0}}'); st.latex(r'R^{hold}_{a}=R^{capital}_{a}+R^{income}_{a}'); st.latex(r'CapitalShare_a=R^{capital}_a/R^{hold}_a,\quad IncomeShare_a=R^{income}_a/R^{hold}_a'); st.header('Portfolio construction'); st.latex(r'n_{a,0}=\frac{w_a V_0}{P_{a,0}}'); st.latex(r'V_t=\sum_a V_{a,t}')
 
 @st.dialog('Full Data Audit',width='large')
 def show_audit_report():
- st.header('Sources & transformations'); st.write('Yahoo instruments use exact user-entered ticker symbols with history(auto_adjust=False, actions=True). Close, Dividends and Stock Splits are captured as plain pandas series. Adjusted Close is not used. No automatic FX overlay is applied.'); st.write('GOVI is the only repository series and is monthly-only.'); st.write(f'Configured window: {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y}; {len(prices):,} observations.')
+ st.header('Sources & transformations'); st.write('Market instruments currently routed through the market-data adapter use history(auto_adjust=False, actions=True); Close, Dividends and Stock Splits are captured as plain pandas series. Repository series use their native validated data. The selector is source-aware and does not present the portfolio as Yahoo-only. Adjusted Close is not used. No automatic FX overlay is applied.'); st.write('GOVI is the only repository series and is monthly-only.'); st.write(f'Configured window: {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y}; {len(prices):,} observations.')
 if latex_slot.button('LaTeX',use_container_width=True): show_latex_report()
 if audit_slot.button('Data Audit',use_container_width=True): show_audit_report()
