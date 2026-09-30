@@ -21,6 +21,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pytest
       - name: Compile Python
-        run: python -m py_compile app.py app_v2.py feature_config.py test_feature_config.py test_app_v2_logic.py
+        run: python -m py_compile app.py app_v2.py feature_config.py daily_window.py test_feature_config.py test_app_v2_logic.py test_daily_window.py
       - name: Run deterministic validation tests
-        run: pytest -q test_app_v2_logic.py && python test_feature_config.py
+        run: pytest -q test_app_v2_logic.py test_daily_window.py && python test_feature_config.py
