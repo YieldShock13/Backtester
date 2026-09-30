@@ -115,16 +115,21 @@ def resolve_dates(index,timeline,custom_start,custom_end,daily=False):
  if len(available)==0: raise RuntimeError('No observations in requested timeline')
  return available[0],available[-1],requested
 
-def portfolio_values(prices,divs,alloc,reinvest,rebalance=False):
+def portfolio_values(prices,divs,alloc,reinvest,rebalance=False,hedge_returns=None):
  assets=list(alloc); target=pd.Series(alloc,dtype=float)/sum(alloc.values()); units=pd.Series({a:alloc[a]/float(prices[a].iloc[0]) for a in assets}); cash=pd.Series(0.0,index=assets)
  v=pd.DataFrame(index=prices.index,columns=assets,dtype=float); v.iloc[0]=pd.Series(alloc)
+ hedge_returns=hedge_returns if hedge_returns is not None else pd.DataFrame(0.0,index=prices.index,columns=assets)
+ hedge_returns=hedge_returns.reindex(index=prices.index,columns=assets,fill_value=0.0).fillna(0.0)
  for i in range(1,len(prices)):
   dt=prices.index[i]; prev=prices.index[i-1]
   if rebalance and dt.year!=prev.year:
    total=(units*prices.loc[prev,assets]+cash).sum(); units=(target*total)/prices.loc[prev,assets]; cash[:]=0.0
+  prev_exposure=units*prices.loc[prev,assets]
+  hedge_pnl=prev_exposure*hedge_returns.loc[dt,assets]
   flows=units*divs.loc[dt,assets]
   if reinvest: units=units+flows/prices.loc[dt,assets]
   else: cash=cash+flows
+  cash=cash+hedge_pnl
   v.loc[dt,assets]=units*prices.loc[dt,assets]+cash
  v['PORTFOLIO']=v[assets].sum(axis=1); return v
 
@@ -165,6 +170,28 @@ def conditional_beta(v,market_price,threshold=-.10):
  rp=v.PORTFOLIO.pct_change(fill_method=None); rm=market_price.pct_change(fill_method=None); dd=market_price/market_price.cummax()-1; d=pd.concat([rp.rename('P'),rm.rename('M'),dd.rename('DD')],axis=1).dropna(); d=d[d.DD<=threshold]
  return d.P.cov(d.M)/d.M.var() if len(d)>=2 and d.M.var()>0 else np.nan,len(d)
 
+
+@st.cache_data(ttl=3600,show_spinner=False)
+def load_fx_pair(pair_symbol,daily_mode):
+ h=yf.Ticker(pair_symbol).history(start=START,auto_adjust=False,actions=False)
+ if h.empty: raise RuntimeError(f'FX source returned no data for {pair_symbol}')
+ x=pd.to_numeric(h['Close'],errors='coerce').dropna(); x.index=pd.to_datetime(x.index).tz_localize(None); x=x.sort_index()
+ if not daily_mode: x=x.resample('ME').last()
+ return x.rename(pair_symbol)
+
+def estimate_fx_hedges(prices,divs,hedged_assets,fx_pairs,daily_mode):
+ hedge=pd.DataFrame(0.0,index=prices.index,columns=prices.columns); rows=[]
+ asset_total=(prices-prices.shift(1)+divs)/prices.shift(1)
+ for asset in hedged_assets:
+  pair=fx_pairs[asset]; fx=load_fx_pair(pair,daily_mode).reindex(prices.index).ffill(); fr=fx.pct_change(fill_method=None)
+  d=pd.concat([asset_total[asset].rename('asset'),fr.rename('fx')],axis=1).dropna()
+  if len(d)<12: raise RuntimeError(f'{asset}: fewer than 12 aligned observations for FX beta estimation against {pair}')
+  var=float(d.fx.var()); beta=float(d.asset.cov(d.fx)/var) if var>0 else np.nan
+  if not np.isfinite(beta): raise RuntimeError(f'{asset}: FX beta could not be estimated against {pair}')
+  alpha=float(d.asset.mean()-beta*d.fx.mean()); fitted=alpha+beta*d.fx; ssr=float(((d.asset-fitted)**2).sum()); sst=float(((d.asset-d.asset.mean())**2).sum()); r2=1-ssr/sst if sst>0 else np.nan
+  hedge.loc[:,asset]=(-beta*fr).reindex(prices.index).fillna(0.0)
+  rows.append({'Instrument':asset,'FX Pair':pair,'Observations':len(d),'Alpha (periodic)':alpha,'FX Beta / Hedge Ratio':beta,'R²':r2,'Sample Start':d.index.min(),'Sample End':d.index.max()})
+ return hedge,pd.DataFrame(rows)
 
 @st.cache_data(ttl=3600,show_spinner=False)
 def load_macro_factors(daily_mode):
@@ -223,6 +250,21 @@ if results:
 ASSETS=st.multiselect('Selected assets',options=list(dict.fromkeys(st.session_state.selected_assets+DEFAULT_TICKERS+['GOVI'])),default=st.session_state.selected_assets,key='selected_assets_widget')
 st.session_state.selected_assets=ASSETS
 if not ASSETS: st.error('Select at least one asset.'); st.stop()
+st.markdown('**FX Hedging**')
+fxc1,fxc2=st.columns(2)
+with fxc1: FX_HEDGED=st.toggle('FX hedged',value=False)
+with fxc2: BASE_CCY=st.selectbox('Portfolio / base currency',['ZAR','USD','EUR','GBP','JPY','CHF','AUD','CAD'],index=0,disabled=not FX_HEDGED)
+HEDGED_ASSETS=[]; FX_PAIRS={}
+if FX_HEDGED:
+ HEDGED_ASSETS=st.multiselect('Assets to FX hedge',options=ASSETS,default=[],help='Only assets already selected in the portfolio can be hedged.')
+ foreign_ccys=[x for x in ['USD','EUR','GBP','JPY','CHF','AUD','CAD','ZAR'] if x!=BASE_CCY]
+ if HEDGED_ASSETS:
+  st.caption('Select the FX pair used to estimate each asset’s in-sample currency beta. Pair direction is foreign currency per base-currency quote convention as supplied by the market-data series.')
+  fxcols=st.columns(3)
+  for i,a_fx in enumerate(HEDGED_ASSETS):
+   opts=[f'{ccy}{BASE_CCY}=X' for ccy in foreign_ccys]
+   default_i=opts.index(f'USD{BASE_CCY}=X') if f'USD{BASE_CCY}=X' in opts else 0
+   with fxcols[i%3]: FX_PAIRS[a_fx]=st.selectbox(f'{a_fx} FX pair',opts,index=default_i,key=f'fxpair_{a_fx}_{BASE_CCY}')
 st.markdown('**Weights**'); cols=st.columns(3); raww={}; default_sum=sum(DEFAULT_WEIGHTS.get(x,0.0) for x in ASSETS)
 for i,a0 in enumerate(ASSETS):
  default=(DEFAULT_WEIGHTS.get(a0,0.0)/default_sum*100) if default_sum>0 else 100/len(ASSETS)
@@ -238,11 +280,16 @@ try:
   if len(prices)<2: raise RuntimeError('Selected timeline has fewer than two common observations')
   asset_r=(prices-prices.shift(1)+divs)/prices.shift(1); bad=asset_r.abs().max(); bad=bad[bad>(.35 if daily_mode else 1.0)]
   if len(bad): raise RuntimeError('Implausible asset return(s): '+', '.join(f'{k}={v:.1%}' for k,v in bad.items()))
-  bh=portfolio_values(prices,divs,ALLOC,REINVEST,False); rb=portfolio_values(prices,divs,ALLOC,REINVEST,True)
+  fx_hedge_returns=pd.DataFrame(0.0,index=prices.index,columns=ASSETS); fx_hedge_report=pd.DataFrame()
+  if FX_HEDGED and HEDGED_ASSETS:
+   fx_hedge_returns,fx_hedge_report=estimate_fx_hedges(prices,divs,HEDGED_ASSETS,FX_PAIRS,daily_mode)
+  bh=portfolio_values(prices,divs,ALLOC,REINVEST,False,fx_hedge_returns); rb=portfolio_values(prices,divs,ALLOC,REINVEST,True,fx_hedge_returns)
 except Exception as e: st.error(f'Data update/validation failed: {e}'); st.exception(e); st.stop()
 data_flags=[]
 if start>requested: data_flags.append(f'Requested start {requested:%Y-%m-%d} unavailable for the selected common asset set; backtest starts at {start:%Y-%m-%d}.')
-frequency='daily' if daily_mode else 'month-end'; st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} observations | Nominal {INITIAL:,.0f} | RF {RF:.2%} | Dividends '+('reinvested' if REINVEST else 'retained as cash'))
+frequency='daily' if daily_mode else 'month-end'; st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} observations | Nominal {INITIAL:,.0f} | RF {RF:.2%} | Dividends '+('reinvested' if REINVEST else 'retained as cash')+(' | FX beta hedge active' if FX_HEDGED and HEDGED_ASSETS else ' | FX unhedged'))
+if FX_HEDGED and HEDGED_ASSETS and not fx_hedge_report.empty:
+ st.subheader('FX Beta Hedge — In-Sample Estimates'); fxshow=fx_hedge_report.copy(); fxshow['Alpha (periodic)']=fxshow['Alpha (periodic)'].map(lambda x:f'{x:.4%}'); fxshow['FX Beta / Hedge Ratio']=fxshow['FX Beta / Hedge Ratio'].map(lambda x:f'{x:.4f}'); fxshow['R²']=fxshow['R²'].map(lambda x:f'{x:.4f}'); st.dataframe(fxshow,hide_index=True,use_container_width=True)
 if data_flags: st.warning('DATA FLAGS — '+' | '.join(data_flags))
 mode=st.radio('Backtest mode',['Buy & Hold','Annual Rebalanced'],horizontal=True,index=0); vals=bh if mode=='Buy & Hold' else rb
 bench_p,bench_d,_=load_ticker_components((BENCHMARK_TICKER,)); bp=bench_p[BENCHMARK_TICKER].reindex(prices.index).ffill(); bd=bench_d[BENCHMARK_TICKER].reindex(prices.index,fill_value=0.0); market_r=(bp-bp.shift(1)+bd)/bp.shift(1); met=stats(vals,market_r,RF,ppy)
@@ -381,7 +428,15 @@ def show_latex_report():
  st.latex(r'DD^m_t=\frac{P^m_t}{\max_{s\le t}P^m_s}-1')
  st.latex(r'\mathcal S=\{t:DD^m_t\le-10\%\},\qquad \beta_{cond}=\frac{Cov(r_p,r_m\mid t\in\mathcal S)}{Var(r_m\mid t\in\mathcal S)}')
  st.write(f'Conditional beta='+('N/A' if not np.isfinite(cb) else f'{cb:.6f}')+f'; stress observations={ncb}.')
- st.header('21. Return attribution by instrument')
+ st.header('21. FX beta hedging')
+ st.latex(r'r_{i,t}=\alpha_i+\beta_{FX,i}r_{FX,t}+\epsilon_{i,t}')
+ st.latex(r'\hat\beta_{FX,i}=\frac{\operatorname{Cov}(r_i,r_{FX})}{\operatorname{Var}(r_{FX})}')
+ st.latex(r'h_{i,t}=-\hat\beta_{FX,i}r_{FX,t},\qquad P\&L^{hedge}_{i,t}=V_{i,t-1}^{market}h_{i,t}')
+ st.latex(r'V^{hedged}_{i,t}=q_{i,t}P_{i,t}+C_{i,t}+P\&L^{hedge}_{i,t}')
+ st.write('The FX beta is estimated in-sample over the currently configured common backtest window and is recalculated whenever the window, selected asset, frequency, or FX pair changes. The hedge is applied as a cash-settled return overlay to the prior-period market exposure; distributions remain explicit and are not replaced by Adjusted Close.')
+ st.write(f'Base currency: {BASE_CCY}; FX hedge enabled: {FX_HEDGED}; hedged assets: {HEDGED_ASSETS}.')
+ if FX_HEDGED and HEDGED_ASSETS and not fx_hedge_report.empty: st.dataframe(fx_hedge_report,hide_index=True,use_container_width=True)
+ st.header('22. Return attribution by instrument')
  st.latex(r'R_i^{tot}=R_i^{cap}+R_i^{inc},\qquad 1=\frac{R_i^{cap}}{R_i^{tot}}+\frac{R_i^{inc}}{R_i^{tot}}')
  st.dataframe(at,hide_index=True,use_container_width=True)
  st.header('22. Macro risk and conditional performance')
