@@ -1,0 +1,45 @@
+name: Apply actual UI rebuild
+on:
+  push:
+    branches: [actual-ui-rebuild]
+    paths:
+      - 'scripts/apply_actual_ui_rebuild.py'
+      - '.github/workflows/apply_actual_ui_rebuild.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: actual-ui-rebuild
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply scoped migration
+        run: python scripts/apply_actual_ui_rebuild.py
+      - name: Compile
+        run: python -m py_compile app.py
+      - name: Regression and feature assertions
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('app.py').read_text()
+          required=["st.pills('Search results'","resolve_instrument_names","'Instrument':instrument_names","Pearson Correlation Matrix","Complete Calculation Workings","CapitalShare_a","Sharpe=","Sortino=","VaR_{95}","NetCorrelation","beta_{cond}","auto_adjust=False"]
+          missing=[x for x in required if x not in s]
+          if missing: raise SystemExit('MISSING: '+repr(missing))
+          forbidden=["st.button('Add asset'","Adjusted Close is used","FX Attribution to Total Return"]
+          bad=[x for x in forbidden if x in s]
+          if bad: raise SystemExit('FORBIDDEN: '+repr(bad))
+          print('FEATURE + REGRESSION ASSERTIONS PASS')
+          PY
+      - name: Commit rebuilt app
+        run: |
+          if git diff --quiet -- app.py; then echo 'No app diff produced' && exit 1; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git commit -m 'Implement searchable universe names and complete workings'
+          git push origin HEAD:actual-ui-rebuild
