@@ -1,0 +1,42 @@
+name: Fix search widget callback safely
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/fix_search_widget_state_v2.py'
+      - '.github/workflows/fix_search_widget_state_v2.yml'
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply hotfix
+        run: python scripts/fix_search_widget_state_v2.py
+      - name: Compile
+        run: python -m py_compile app.py
+      - name: Assert callback state mutation only
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('app.py').read_text()
+          assert "def _select_search_asset():" in s
+          assert "on_change=_select_search_asset" in s
+          assert "st.session_state.asset_search_pick=None" not in s
+          assert "st.rerun()" not in s[s.index("if results:"):s.index("ASSETS=st.multiselect")]
+          assert "Pearson Correlation Matrix" in s
+          assert "auto_adjust=False" in s
+          print('PASS')
+          PY
+      - name: Commit app hotfix
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git diff --cached --quiet && exit 1
+          git commit -m 'Fix search selection widget lifecycle'
+          git push origin HEAD:main
