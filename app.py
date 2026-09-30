@@ -171,7 +171,10 @@ def fx_attribution(local,fx,zar_price,divs,assets):
   rows.append({'Asset':a,'Total ZAR Return':total,'Underlying contribution % of total':l/total if total else np.nan,'FX contribution % of total':f/total if total else np.nan,'FX interaction % of total':interaction/total if total else np.nan,'Cash distribution % of total':cash/total if total else np.nan})
  return pd.DataFrame(rows)
 
-st.title('Portfolio Backtester')
+title_col, report_col1, report_col2 = st.columns([8,1,1])
+with title_col: st.title('Portfolio Backtester')
+latex_slot=report_col1.empty()
+audit_slot=report_col2.empty()
 st.subheader('Backtest Configuration')
 a,b,c,d=st.columns(4)
 with a: timeline=st.selectbox('Timeline',['1W','1M','3M','6M','1Y','3Y','5Y','10Y','All','Custom'],index=8)
@@ -209,10 +212,15 @@ try:
    if not np.allclose(v[ASSETS].sum(axis=1),v.PORTFOLIO,atol=.01,rtol=0): raise RuntimeError(f'{name} sleeve reconciliation failed')
 except Exception as e: st.error(f'Data update/validation failed: {e}'); st.exception(e); st.stop()
 
-if start>requested: st.warning(f'Requested start {requested:%Y-%m-%d} unavailable for the selected common asset set. Backtest starts at first common validated observation: {start:%Y-%m-%d}.')
+data_flags=[]
+if start>requested:
+ data_flags.append(f'Requested start {requested:%Y-%m-%d} unavailable for the selected common asset set; backtest starts at {start:%Y-%m-%d}.')
 frequency='daily' if daily_mode else 'month-end'
+if 'SA_BONDS' in ASSETS and prices.index[-1] > bond_validation['last_govi']:
+ data_flags.append(f'SA_BONDS uses STXGVI continuation after GOVI cutoff {bond_validation["last_govi"]:%d %b %Y}.')
 st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} observations | Nominal R{INITIAL:,.0f} | RF {RF:.2%} | Dividends '+('reinvested' if REINVEST else 'retained as cash'))
-st.success(f"Data validation PASS | GOVI authoritative through {bond_validation['last_govi']:%d %b %Y} | observation frequency: {frequency} | accounting identities: PASS")
+if data_flags:
+ st.warning('DATA FLAGS — ' + ' | '.join(data_flags))
 
 mode=st.radio('Backtest mode',['Buy & Hold','Annual Rebalanced'],horizontal=True,index=0); vals=bh if mode=='Buy & Hold' else rb
 market_r=asset_r['ALSI'] if 'ALSI' in asset_r else pd.Series(index=asset_r.index,dtype=float); met=stats(vals,market_r,RF,ppy) if 'ALSI' in ASSETS else stats(vals,vals.PORTFOLIO.pct_change(fill_method=None),RF,ppy)
@@ -237,17 +245,68 @@ if len(fxa):
  st.dataframe(fxa,hide_index=True,use_container_width=True); st.caption('Attribution shares reconcile underlying appreciation + FX translation + interaction + cash distributions to each foreign asset’s total ZAR return. FX contribution is shown as a percentage of total return.')
 else: st.caption('No foreign-currency assets selected.')
 
-st.divider()
-with st.expander('Show workings in LaTeX',expanded=False):
- st.header('Full Calculation Workings')
- st.latex(r'P^{ZAR}_{a,t}=P^{local}_{a,t}\times FX_t'); st.latex(r'D^{ZAR}_{a,t}=D^{local}_{a,t}\times FX_t'); st.latex(r'r_{a,t}=\frac{P_{a,t}-P_{a,t-1}+D_{a,t}}{P_{a,t-1}}'); st.latex(r'n_{a,0}=\frac{w_a V_0}{P_{a,0}}'); st.latex(r'V^{cash}_{a,t}=n_{a,t}P_{a,t}+C_{a,t},\quad C_{a,t}=C_{a,t-1}+n_{a,t}D_{a,t}'); st.latex(r'n^{reinv}_{a,t}=n_{a,t-1}+\frac{n_{a,t-1}D_{a,t}}{P_{a,t}}'); st.latex(r'V_t=\sum_a V_{a,t}'); st.latex(r'R=\frac{V_T}{V_0}-1,\qquad CAGR=\left(\frac{V_T}{V_0}\right)^{1/Y}-1'); st.latex(r'\sigma_{ann}=\sigma_p\sqrt{N},\qquad r_{f,p}=(1+r_f)^{1/N}-1'); st.latex(r'Sharpe=\frac{\overline{r_p-r_{f,p}}}{\sigma(r_p-r_{f,p})}\sqrt{N}'); st.latex(r'DD_t=\frac{V_t}{\max_{s\le t}V_s}-1,\qquad MDD=\min_t DD_t'); st.latex(r'\beta=\frac{Cov(r_p-r_f,r_m-r_f)}{Var(r_m-r_f)},\qquad \alpha_p=\overline{r_p-r_f}-\beta\overline{r_m-r_f}'); st.latex(r'\beta_{cond}=\frac{Cov(r_p,r_m\mid DD_m\le -10\%)}{Var(r_m\mid DD_m\le -10\%)}'); st.latex(r'1+R_{ZAR}=(1+R_{local})(1+R_{FX})'); st.latex(r'R_{ZAR}=R_{local}+R_{FX}+R_{local}R_{FX}+R_{cash}'); st.latex(r'FX\ attribution\ \%=\frac{R_{FX}}{R_{ZAR}},\quad Underlying\ attribution\ \%=\frac{R_{local}}{R_{ZAR}}')
- st.markdown(f'For this run, $N={ppy}$ observations per year ({frequency}). The FX table also reports interaction and cash-distribution shares so components reconcile to total ZAR return.')
+@st.dialog('Full Calculation Workings', width='large')
+def show_latex_report():
+ st.caption(f'Configured run: {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} | N={ppy}')
+ st.header('Data & total-return construction')
+ st.latex(r'P^{ZAR}_{a,t}=P^{local}_{a,t}\\times FX_t')
+ st.latex(r'D^{ZAR}_{a,t}=D^{local}_{a,t}\\times FX_t')
+ st.latex(r'r_{a,t}=\\frac{P_{a,t}-P_{a,t-1}+D_{a,t}}{P_{a,t-1}}')
+ st.header('Portfolio construction')
+ st.latex(r'n_{a,0}=\\frac{w_a V_0}{P_{a,0}}')
+ st.latex(r'V^{cash}_{a,t}=n_{a,t}P_{a,t}+C_{a,t},\\quad C_{a,t}=C_{a,t-1}+n_{a,t}D_{a,t}')
+ st.latex(r'n^{reinv}_{a,t}=n_{a,t-1}+\\frac{n_{a,t-1}D_{a,t}}{P_{a,t}}')
+ st.latex(r'V_t=\\sum_a V_{a,t}')
+ st.header('Return & risk statistics')
+ st.latex(r'R=\\frac{V_T}{V_0}-1,\\qquad CAGR=\\left(\\frac{V_T}{V_0}\\right)^{1/Y}-1')
+ st.latex(r'\\sigma_{ann}=\\sigma_p\\sqrt{N},\\qquad r_{f,p}=(1+r_f)^{1/N}-1')
+ st.latex(r'Sharpe=\\frac{\\overline{r_p-r_{f,p}}}{\\sigma(r_p-r_{f,p})}\\sqrt{N}')
+ st.latex(r'\\sigma_{down}=\\sqrt{N}\\sqrt{E[(r_p-r_f)^2\\mid r_p-r_f<0]}')
+ st.latex(r'Sortino=\\frac{N\\,\\overline{r_p-r_f}}{\\sigma_{down}}')
+ st.latex(r'DD_t=\\frac{V_t}{\\max_{s\\le t}V_s}-1,\\qquad MDD=\\min_t DD_t')
+ st.latex(r'Calmar=\\frac{CAGR}{|MDD|}')
+ st.latex(r'VaR_{95}=Q_{0.05}(r_p),\\qquad CVaR_{95}=E[r_p\\mid r_p\\le VaR_{95}]')
+ st.header('Market sensitivity')
+ st.latex(r'\\beta=\\frac{Cov(r_p-r_f,r_m-r_f)}{Var(r_m-r_f)}')
+ st.latex(r'\\alpha_p=\\overline{r_p-r_f}-\\beta\\overline{r_m-r_f},\\qquad \\alpha_{ann}=(1+\\alpha_p)^N-1')
+ st.latex(r'\\beta_{cond}=\\frac{Cov(r_p,r_m\\mid DD_m\\le -10\\%)}{Var(r_m\\mid DD_m\\le -10\\%)}')
+ st.header('Rolling analytics')
+ st.latex(r'R_{1Y,t}=\\prod_{i=t-N+1}^{t}(1+r_i)-1')
+ st.latex(r'\\sigma_{1Y,t}=sd(r_{t-N+1:t})\\sqrt{N}')
+ st.latex(r'Sharpe_{3Y,t}=\\frac{mean(r-r_f)}{sd(r-r_f)}\\sqrt{N}')
+ st.header('FX attribution')
+ st.latex(r'1+R_{ZAR}=(1+R_{local})(1+R_{FX})')
+ st.latex(r'R_{ZAR}=R_{local}+R_{FX}+R_{local}R_{FX}+R_{cash}')
+ st.latex(r'Contribution_i\\%=\\frac{R_i}{R_{ZAR}}')
+ st.caption('N is 252 for daily runs and 12 for month-end runs. Annual rebalancing resets sleeves to configured target weights at the first observation of each new calendar year.')
 
-with st.expander('Data Audit Report',expanded=False):
- st.write('**Data connections** — Yahoo Finance raw Close/actions for market assets and FX; repository GOVI monthly series for SA government bonds; STXGVI continuation after the authoritative GOVI cutoff.')
- st.write(f'**Observation frequency** — {frequency}. 1W, 1M, 3M, 6M and 1Y (and custom windows ≤366 days) use observed daily data. Longer windows use month-end observations.')
- st.write('**Corporate actions** — Adjusted Close is not used. Yahoo Close is treated as already split-normalised; split events are not applied again. Cash dividends/distributions are explicit and follow the selected reinvestment setting.')
- st.write(f"**SA bond interpolation / instrument change** — GOVI is authoritative through {bond_validation['last_govi']:%d %b %Y}. Daily short-window SA bond analysis uses STXGVI only after that cutoff; if the requested period begins earlier, common-history truncation is explicitly flagged. No monthly GOVI observations are interpolated into fake daily prices.")
- st.write('**Common coverage** — all tests use the same selected assets and same common configured date window. If requested history predates common availability, the backtest is shortened and flagged above.')
- st.write('**Validation concerns requiring deeper inspection** — Yahoo source revisions/corporate-action corrections; ETF distribution unit conventions; instrument-proxy basis around the GOVI/STXGVI splice; and any return exceeding the hard sanity threshold.')
- st.write('**Accounting checks** — starting nominal reconciles; sleeve values sum to portfolio value; total-return identity is checked from raw Close plus explicit cash distributions; implausible moves stop the run rather than being bypassed.')
+@st.dialog('Full Data Audit', width='large')
+def show_audit_report():
+ st.caption(f'Configured run: {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency}')
+ st.header('Run flags')
+ if data_flags:
+  for flag in data_flags: st.warning(flag)
+ else: st.success('No data flags for the configured run.')
+ st.header('Sources & transformations')
+ st.write('**Market assets and FX** — Yahoo Finance raw Close and actions. Adjusted Close is not used.')
+ st.write('**South African government bonds** — repository GOVI monthly history; STXGVI continuation only after the authoritative GOVI cutoff.')
+ st.write(f'**Observation frequency** — {frequency}. 1W, 1M, 3M, 6M, 1Y and custom windows ≤366 days use observed daily data; longer windows use month-end observations.')
+ st.write('**Corporate actions** — Yahoo Close is treated as split-normalised; splits are not applied a second time. Cash dividends/distributions are explicit and follow the selected reinvestment setting.')
+ st.write(f'**GOVI cutoff** — {bond_validation["last_govi"]:%d %b %Y}. No monthly GOVI observations are interpolated into fake daily prices.')
+ st.header('Coverage & validation')
+ st.write(f'**Selected assets** — {", ".join(ASSETS)}')
+ st.write(f'**Common validated window** — {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y}; {len(prices):,} observations.')
+ st.write('**Common coverage rule** — every calculation uses the same selected assets and common configured date window. Missing requested history is surfaced as a run flag.')
+ st.write('**Hard return sanity check** — absolute single-period asset moves above 35% in daily mode or 100% in month-end mode stop the run.')
+ st.write('**Accounting checks** — starting nominal reconciles; sleeve values sum to portfolio value; total return is built from raw Close plus explicit cash distributions.')
+ st.header('Known source/model risks')
+ st.write('Yahoo source revisions or corporate-action corrections; ETF distribution unit conventions; instrument-proxy basis at the GOVI/STXGVI splice; and differences between selected proxies and investable execution prices.')
+ st.header('Current run status')
+ st.write('Accounting identities: PASS')
+ st.write('Return sanity checks: PASS')
+ st.write('Common-history validation: PASS')
+
+if latex_slot.button('LaTeX', use_container_width=True, help='Open the complete calculation methodology'):
+ show_latex_report()
+if audit_slot.button('Data Audit', use_container_width=True, help='Open the complete data audit for this configured run'):
+ show_audit_report()
