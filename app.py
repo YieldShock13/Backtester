@@ -294,14 +294,16 @@ def one_period_shock_stats(vals,market_price,factor_change,threshold,rf,ppy,labe
  return {'Scenario':label,'Historical Events':len(e),'Avg Portfolio Event Return':e.P.mean() if len(e) else np.nan,'Median Portfolio Event Return':e.P.median() if len(e) else np.nan,'Avg Benchmark Event Return':e.M.mean() if len(e) else np.nan,'Avg Factor Shock':e.F.mean() if len(e) else np.nan,'Worst Portfolio Event':e.P.min() if len(e) else np.nan,'Best Portfolio Event':e.P.max() if len(e) else np.nan,'Positive Portfolio Events':(e.P>0).mean() if len(e) else np.nan,'Conditional Beta':beta,'Conditional Alpha (periodic)':alpha,'CAPM Period Obs':n}
 
 def walk_forward_validation(vals,market_r,rf,ppy=52,window=52,var_method='Historical',var_level=.95):
- rp=vals.PORTFOLIO.pct_change(fill_method=None).rename('Portfolio')
- d=pd.concat([rp,market_r.rename('Benchmark')],axis=1).dropna()
+ rp=vals.PORTFOLIO.pct_change(fill_method=None).dropna().rename('Portfolio')
+ mr=market_r.rename('Benchmark') if market_r is not None else pd.Series(dtype=float,name='Benchmark')
  rfp=(1+rf)**(1/ppy)-1; rows=[]; z95=-1.6448536269514722
- for i in range(window,len(d)):
-  train=d.iloc[i-window:i]; test=d.iloc[i]; x=train.Benchmark-rfp; y=train.Portfolio-rfp
-  beta=y.cov(x)/x.var() if x.var()>0 else np.nan; alpha=y.mean()-beta*x.mean() if np.isfinite(beta) else np.nan
-  capm_pred=rfp+alpha+beta*(test.Benchmark-rfp) if np.isfinite(beta) else np.nan
-  tr=train.Portfolio.dropna()
+ for i in range(window,len(rp)):
+  train_p=rp.iloc[i-window:i]; test_p=rp.iloc[i]; dt=rp.index[i]; tr=train_p.dropna(); beta=alpha=capm_pred=np.nan; test_b=np.nan
+  if len(mr):
+   hist=pd.concat([train_p,mr.reindex(train_p.index)],axis=1).dropna()
+   if len(hist)>=window:
+    x=hist.Benchmark-rfp; y=hist.Portfolio-rfp; beta=y.cov(x)/x.var() if x.var()>0 else np.nan; alpha=y.mean()-beta*x.mean() if np.isfinite(beta) else np.nan; test_b=mr.reindex([dt]).iloc[0]
+    capm_pred=rfp+alpha+beta*(test_b-rfp) if np.isfinite(beta) and pd.notna(test_b) else np.nan
   if var_method=='Historical': q=float(tr.quantile(1-var_level)); sigma=np.nan
   elif var_method=='Parametric':
    mu=float(tr.mean()); sigma=float(tr.std(ddof=1)); q=mu+z95*sigma
@@ -313,7 +315,7 @@ def walk_forward_validation(vals,market_r,rf,ppy=52,window=52,var_method='Histor
     fc=fit.forecast(horizon=1,reindex=False); mu=float(fit.params.get('mu',tr.mean()*100))/100; sigma=float(np.sqrt(fc.variance.values[-1,0]))/100; q=mu+z95*sigma
    except Exception:
     q=np.nan; sigma=np.nan
-  rows.append({'Date':d.index[i],'Actual Return':float(test.Portfolio),'Benchmark Return':float(test.Benchmark),'CAPM Forecast':capm_pred,'CAPM Alpha':alpha,'CAPM Beta':beta,'VaR 95%':q,'VaR Breach':bool(test.Portfolio<q) if np.isfinite(q) else False,'Forecast Sigma':sigma})
+  rows.append({'Date':dt,'Actual Return':float(test_p),'Benchmark Return':float(test_b) if pd.notna(test_b) else np.nan,'CAPM Forecast':capm_pred,'CAPM Alpha':alpha,'CAPM Beta':beta,'VaR 95%':q,'VaR Breach':bool(test_p<q) if np.isfinite(q) else False,'Forecast Sigma':sigma})
  out=pd.DataFrame(rows).set_index('Date') if rows else pd.DataFrame()
  return out
 
@@ -357,20 +359,25 @@ if results:
 ASSETS=st.multiselect('Selected assets',options=list(dict.fromkeys(st.session_state.selected_assets+DEFAULT_TICKERS+['GOVI'])),default=st.session_state.selected_assets,key='selected_assets_widget')
 st.session_state.selected_assets=ASSETS
 if not ASSETS: st.error('Select at least one asset.'); st.stop()
-st.markdown('**Benchmark**')
+st.markdown('**Benchmark (optional)**')
+USE_BENCHMARK=st.toggle('Use benchmark',value=True,key='use_benchmark')
 if 'benchmark_symbol' not in st.session_state: st.session_state.benchmark_symbol=BENCHMARK_TICKER
 if 'benchmark_name' not in st.session_state: st.session_state.benchmark_name='FTSE/JSE All Share Index'
-benchmark_query=st.text_input('Search benchmark',placeholder='Search by index, ETF, fund or ticker',key='benchmark_search_query')
-benchmark_results=search_assets(benchmark_query) if benchmark_query.strip() else []
-if benchmark_results:
- benchmark_labels=[f"{r['name']} — {r['symbol']}" for r in benchmark_results]
- def _select_benchmark():
-  picked=st.session_state.get('benchmark_search_pick')
-  if picked is None: return
-  row=benchmark_results[picked]; st.session_state.benchmark_symbol=row['symbol']; st.session_state.benchmark_name=row['name']
- st.pills('Benchmark search results',options=range(len(benchmark_results)),format_func=lambda i: benchmark_labels[i],selection_mode='single',key='benchmark_search_pick',on_change=_select_benchmark)
-BENCHMARK=st.session_state.benchmark_symbol
-st.caption(f"Selected benchmark: {st.session_state.benchmark_name} — {BENCHMARK}")
+if USE_BENCHMARK:
+ benchmark_query=st.text_input('Search benchmark',placeholder='Search by index, ETF, fund or ticker',key='benchmark_search_query')
+ benchmark_results=search_assets(benchmark_query) if benchmark_query.strip() else []
+ if benchmark_results:
+  benchmark_labels=[f"{r['name']} — {r['symbol']}" for r in benchmark_results]
+  def _select_benchmark():
+   picked=st.session_state.get('benchmark_search_pick')
+   if picked is None: return
+   row=benchmark_results[picked]; st.session_state.benchmark_symbol=row['symbol']; st.session_state.benchmark_name=row['name']
+  st.pills('Benchmark search results',options=range(len(benchmark_results)),format_func=lambda i: benchmark_labels[i],selection_mode='single',key='benchmark_search_pick',on_change=_select_benchmark)
+ BENCHMARK=st.session_state.benchmark_symbol
+ st.caption(f"Selected benchmark: {st.session_state.benchmark_name} — {BENCHMARK}")
+else:
+ BENCHMARK=None
+ st.caption('No benchmark selected. Portfolio analytics and standalone VaR remain available; benchmark beta/alpha/CAPM and benchmark stress are omitted.')
 st.markdown('**FX Hedging**')
 fxc1,fxc2=st.columns(2)
 with fxc1: FX_HEDGED=st.toggle('FX hedged',value=False)
@@ -399,8 +406,16 @@ try:
  with st.spinner('Updating, configuring and validating market data…'):
   full_p,full_d,govi,bond_validation,split_events=build_master(ASSETS)
   asset_weekly=full_p[ASSETS]; first_valid=asset_weekly.apply(lambda c:c.first_valid_index()).dropna(); last_valid=asset_weekly.apply(lambda c:c.last_valid_index()).dropna(); common_inception=max(first_valid); common_endpoint=min(last_valid); comparable=asset_weekly.loc[(asset_weekly.index>=common_inception)&(asset_weekly.index<=common_endpoint)]; raw_week_count=len(comparable); missing_by_asset=comparable.isna().sum().astype(int).to_dict(); common=comparable.dropna(how='any').index; excluded_incomplete_weeks=int(comparable.isna().any(axis=1).sum()); start,end,requested=resolve_dates(common,timeline,custom_start,custom_end,daily_mode); prices=comparable.loc[(comparable.index>=start)&(comparable.index<=end),ASSETS].dropna(how='any'); divs=full_d.reindex(prices.index,fill_value=0.0)[ASSETS]
-  if BENCHMARK=='GOVI': raise RuntimeError('Repository GOVI is monthly-only and cannot be used as a weekly benchmark. Select a daily-history market ticker/proxy.')
-  bench_p,bench_d,_=load_ticker_components((BENCHMARK,)); bp_all=bench_p[BENCHMARK].resample('W-FRI').last(); bd_all=bench_d[BENCHMARK].resample('W-FRI').sum(); benchmark_missing_weeks=int(bp_all.reindex(prices.index).isna().sum()); bp=bp_all.reindex(prices.index); bd=bd_all.reindex(prices.index,fill_value=0.0)
+  benchmark_missing_weeks=0; benchmark_overlap_start=None; benchmark_overlap_end=None
+  if USE_BENCHMARK:
+   if BENCHMARK=='GOVI': raise RuntimeError('Repository GOVI is monthly-only and cannot be used as a weekly benchmark. Select a daily-history market ticker/proxy.')
+   bench_p,bench_d,_=load_ticker_components((BENCHMARK,)); bp_all=bench_p[BENCHMARK].resample('W-FRI').last(); bd_all=bench_d[BENCHMARK].resample('W-FRI').sum()
+   bench_valid=bp_all.dropna(); benchmark_overlap_start=max(prices.index.min(),bench_valid.index.min()); benchmark_overlap_end=min(prices.index.max(),bench_valid.index.max())
+   benchmark_portfolio_index=prices.index[(prices.index>=benchmark_overlap_start)&(prices.index<=benchmark_overlap_end)]
+   benchmark_missing_weeks=int(bp_all.reindex(benchmark_portfolio_index).isna().sum())
+   bp=bp_all.reindex(prices.index); bd=bd_all.reindex(prices.index,fill_value=0.0)
+  else:
+   bp=pd.Series(np.nan,index=prices.index,dtype=float); bd=pd.Series(0.0,index=prices.index,dtype=float)
   if len(prices)<2: raise RuntimeError('Selected timeline has fewer than two synchronized portfolio observations')
   asset_r=(prices-prices.shift(1)+divs)/prices.shift(1); bad=asset_r.abs().max(); bad=bad[bad>(.35 if daily_mode else 1.0)]
   if len(bad): raise RuntimeError('Implausible asset return(s): '+', '.join(f'{k}={v:.1%}' for k,v in bad.items()))
@@ -411,19 +426,18 @@ try:
 except Exception as e: st.error(f'Data update/validation failed: {e}'); st.exception(e); st.stop()
 data_flags=[]
 # Weekly alignment exclusions are documented in Data Audit; they are not promoted to DATA FLAGS unless they prevent the backtest.
-if 'benchmark_missing_weeks' in globals() and benchmark_missing_weeks>0: data_flags.append(f'Benchmark data unavailable for {benchmark_missing_weeks} portfolio week(s). These dates are excluded only from benchmark-dependent analytics (beta, alpha, CAPM and benchmark stress); portfolio history, portfolio returns, CAGR, volatility, drawdown and standalone VaR are unchanged.')
+if USE_BENCHMARK and benchmark_missing_weeks>0: data_flags.append(f'Benchmark has {benchmark_missing_weeks} missing week(s) inside its overlap with the portfolio ({benchmark_overlap_start:%Y-%m-%d} to {benchmark_overlap_end:%Y-%m-%d}). Only those benchmark-dependent observations are dropped; portfolio history and portfolio-level analytics are unchanged.')
+if USE_BENCHMARK and benchmark_overlap_start>prices.index.min(): st.caption(f'Portfolio history begins {prices.index.min():%Y-%m-%d}. Benchmark-dependent analytics begin at the nearest available benchmark overlap date, {benchmark_overlap_start:%Y-%m-%d}; earlier portfolio observations remain in all portfolio-level calculations.')
 if start>requested: data_flags.append(f'Requested start {requested:%Y-%m-%d} unavailable for the selected common asset set; backtest starts at {start:%Y-%m-%d}.')
 frequency='weekly (Friday-labelled; last available trading close)'; st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} observations | Nominal {PORTFOLIO_CCY} {INITIAL:,.0f} | RF {RF:.2%} | Dividends '+('reinvested' if REINVEST else 'retained as cash')+(' | FX beta hedge active' if FX_HEDGED and HEDGED_ASSETS else ' | FX unhedged'))
 if FX_HEDGED and HEDGED_ASSETS and not fx_hedge_report.empty:
  st.subheader('FX Beta Hedge — In-Sample Estimates'); fxshow=fx_hedge_report.copy(); fxshow['Alpha (periodic)']=fxshow['Alpha (periodic)'].map(lambda x:f'{x:.4%}'); fxshow['FX Beta / Hedge Ratio']=fxshow['FX Beta / Hedge Ratio'].map(lambda x:f'{x:.4f}'); fxshow['R²']=fxshow['R²'].map(lambda x:f'{x:.4f}'); st.dataframe(fxshow,hide_index=True,use_container_width=True)
 if data_flags: st.warning('DATA FLAGS — '+' | '.join(data_flags))
 mode=st.radio('Backtest mode',['Buy & Hold','Annual Rebalanced'],horizontal=True,index=0); vals=bh if mode=='Buy & Hold' else rb
-market_r=(bp-bp.shift(1)+bd)/bp.shift(1)
-# Separate benchmark-analysis sample: missing benchmark weeks are excluded ONLY
-# from benchmark-dependent calculations. Portfolio values/returns are untouched.
+market_r=(bp-bp.shift(1)+bd)/bp.shift(1) if USE_BENCHMARK else pd.Series(np.nan,index=prices.index,dtype=float)
 portfolio_r_for_benchmark=vals.PORTFOLIO.pct_change(fill_method=None)
-benchmark_analysis=pd.concat([portfolio_r_for_benchmark.rename('Portfolio'),market_r.rename('Benchmark')],axis=1).dropna()
-benchmark_return_aligned=benchmark_analysis['Benchmark']
+benchmark_analysis=pd.concat([portfolio_r_for_benchmark.rename('Portfolio'),market_r.rename('Benchmark')],axis=1).dropna() if USE_BENCHMARK else pd.DataFrame(columns=['Portfolio','Benchmark'])
+benchmark_return_aligned=benchmark_analysis['Benchmark'] if USE_BENCHMARK else pd.Series(dtype=float)
 met=stats(vals,benchmark_return_aligned,RF,ppy)
 c1,c2,c3,c4=st.columns(4); c1.metric(f'{mode} Value',f"{met['Ending Value']:,.0f}"); c2.metric(f'{mode} CAGR',f"{met['CAGR']:.2%}"); c3.metric(f'Sharpe ({RF:.2%} RF)',f"{met['Sharpe Ratio']:.3f}"); c4.metric('Max Drawdown',f"{met['Maximum Drawdown']:.2%}")
 st.subheader(f'{mode} Analytics'); st.dataframe(metric_table(met),hide_index=True,use_container_width=True)
@@ -442,13 +456,15 @@ for c0 in ['Total Return','Capital Gain','Income / Distributions','Capital Gain 
 st.dataframe(at,hide_index=True,use_container_width=True)
 weights_end=vals[ASSETS].div(vals.PORTFOLIO,axis=0); wt=pd.DataFrame({'Ticker':ASSETS,'Initial Weight':[weights[a0] for a0 in ASSETS],'Ending Weight':weights_end.iloc[-1].values}); wt['Initial Weight']=wt['Initial Weight'].map(lambda x:f'{x:.2%}'); wt['Ending Weight']=wt['Ending Weight'].map(lambda x:f'{x:.2%}'); st.subheader(f'{mode} Portfolio Weights'); st.dataframe(wt,hide_index=True,use_container_width=True)
 st.divider(); st.subheader('Asset Correlation'); corr=asset_r[ASSETS].dropna().corr(); mask=np.triu(np.ones(corr.shape,dtype=bool),k=1); net_corr=float(corr.where(mask).stack().mean()) if len(corr)>1 else np.nan; st.metric('Net Inter-Asset Correlation','N/A' if not np.isfinite(net_corr) else f'{net_corr:.3f}'); heat=go.Figure(data=go.Heatmap(z=corr.values,x=corr.columns,y=corr.index,zmin=-1,zmax=1,zmid=0,colorscale='RdBu',reversescale=True,text=np.round(corr.values,2),texttemplate='%{text:.2f}')); heat.update_layout(title='Pearson Correlation Matrix'); st.plotly_chart(heat,use_container_width=True)
-st.divider(); st.subheader(f'{mode} — Beta & Alpha Evolution vs {BENCHMARK}'); roll_beta,roll_alpha,capm_window=rolling_capm(vals,market_r,RF,ppy); line_chart({f'{capm_window}-period Rolling Beta':roll_beta},f'{mode} — Rolling Beta vs {BENCHMARK}','Beta'); line_chart({f'{capm_window}-period Rolling Alpha':roll_alpha*100},f'{mode} — Rolling Annualised CAPM Alpha','Alpha (%)'); cb,ncb=conditional_beta(vals,bp)
+if USE_BENCHMARK:
+ st.divider(); st.subheader(f'{mode} — Beta & Alpha Evolution vs {BENCHMARK}'); roll_beta,roll_alpha,capm_window=rolling_capm(vals,market_r,RF,ppy); line_chart({f'{capm_window}-period Rolling Beta':roll_beta},f'{mode} — Rolling Beta vs {BENCHMARK}','Beta'); line_chart({f'{capm_window}-period Rolling Alpha':roll_alpha*100},f'{mode} — Rolling Annualised CAPM Alpha','Alpha (%)'); cb,ncb=conditional_beta(vals,bp)
+else: cb,ncb=np.nan,0
 
 st.divider(); st.subheader('Macro Risk & Historical Scenario Analysis')
 st.caption('Historical event analysis: portfolio performance is measured over the same realised market interval as each stress event. Results are event returns, not annualised hypothetical forecasts.')
 bench_label=st.session_state.get('benchmark_name',BENCHMARK)
 sc1,sc2,sc3,sc4,sc5=st.columns(5)
-with sc1: use_bench=st.toggle(f'Benchmark −10% Drawdown ({bench_label} — {BENCHMARK})',value=True,key='macro_benchmark')
+with sc1: use_bench=st.toggle(f'Benchmark −10% Drawdown ({bench_label} — {BENCHMARK})',value=True,key='macro_benchmark',disabled=not USE_BENCHMARK) if USE_BENCHMARK else False
 with sc2: use_oil=st.toggle('Oil +3σ Shock',value=False,key='macro_oil')
 with sc3: use_vix=st.toggle('VIX +2σ Shock',value=False,key='macro_vix')
 with sc4: use_move=st.toggle('MOVE +1.5σ Shock',value=False,key='macro_move')
@@ -464,7 +480,7 @@ if use_oil or use_vix or use_move or use_hyoas:
    if not use: continue
    chg=mf[name].diff() if transform=='diff' else mf[name].pct_change(fill_method=None)
    mu=chg.mean(); sig=chg.std(); threshold=mu+zcut*sig
-   scenario_rows.append(one_period_shock_stats(vals,bp,chg,threshold,RF,ppy,label))
+   scenario_rows.append(one_period_shock_stats(vals,bp,chg,threshold,RF,ppy,label) if USE_BENCHMARK else one_period_shock_stats(vals,pd.Series(np.nan,index=vals.index),chg,threshold,RF,ppy,label))
    macro_factor_meta.append({'Scenario':label,'Factor':name,'Event':'single configured observation interval','Transformation':'percentage-point change' if transform=='diff' else 'percentage change','Mean':mu,'Std Dev':sig,'Threshold':threshold})
  except Exception as e:
   st.warning(f'Macro factor data unavailable for selected scenario(s): {e}')
@@ -480,10 +496,10 @@ else: st.info('Select at least one macro risk scenario.')
 st.divider(); st.subheader('Walk-Forward Validator — 52-Week Estimation Window')
 st.caption('Strict one-step-ahead validation: each CAPM and VaR estimate uses only the preceding 52 weekly observations; the following week is held out for validation.')
 wf_method=st.segmented_control('VaR model',['Historical','Parametric','GARCH(1,1)'],default='Historical',selection_mode='single',key='wf_var_method') or 'Historical'
-wf=walk_forward_validation(vals,market_r,RF,ppy,52,wf_method,.95)
+wf=walk_forward_validation(vals,market_r if USE_BENCHMARK else None,RF,ppy,52,wf_method,.95)
 wf_summary=walk_forward_summary(wf,wf_method)
 if wf.empty:
- st.warning('Walk-forward validation requires at least 53 aligned weekly portfolio/benchmark observations.')
+ st.warning('Walk-forward validation requires at least 53 weekly portfolio observations.')
 else:
  show_sum=wf_summary.copy()
  for c0 in ['CAPM Forecast RMSE','CAPM Forecast MAE','VaR Breach Rate','Expected Breach Rate']:
