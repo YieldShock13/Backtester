@@ -5,6 +5,11 @@ on:
     paths:
       - 'app_configured.py'
       - '.github/workflows/validate_config_engine.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'app_configured.py'
+      - '.github/workflows/validate_config_engine.yml'
   workflow_dispatch:
 jobs:
   validate:
