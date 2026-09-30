@@ -79,49 +79,35 @@ except Exception as e:
 
 bhm,rbm=metrics(bh),metrics(rb)
 st.success(f'Data loaded through {master.index[-1]:%d %b %Y} | SARB GOVI through {govi.index[-1]:%d %b %Y}')
-
-# One control drives ALL single-portfolio outputs below.
 mode=st.radio('Backtest mode',['Buy & Hold','Annual Rebalanced'],horizontal=True,index=0)
 vals=bh if mode=='Buy & Hold' else rb
 met=bhm if mode=='Buy & Hold' else rbm
 
 c1,c2,c3,c4=st.columns(4)
-c1.metric(f'{mode} Value',f"R{met['Ending Value']:,.0f}")
-c2.metric(f'{mode} CAGR',f"{met['CAGR']:.2%}")
-c3.metric('Sharpe (7% RF)',f"{met['Sharpe Ratio (RF 7%)']:.3f}")
-c4.metric('Max Drawdown',f"{met['Maximum Drawdown']:.2%}")
-
-st.subheader(f'{mode} Analytics')
-st.dataframe(metric_table(met),hide_index=True,use_container_width=True)
-
+c1.metric(f'{mode} Value',f"R{met['Ending Value']:,.0f}"); c2.metric(f'{mode} CAGR',f"{met['CAGR']:.2%}"); c3.metric('Sharpe (7% RF)',f"{met['Sharpe Ratio (RF 7%)']:.3f}"); c4.metric('Max Drawdown',f"{met['Maximum Drawdown']:.2%}")
+st.subheader(f'{mode} Analytics'); st.dataframe(metric_table(met),hide_index=True,use_container_width=True)
 p=vals['PORTFOLIO']; r=p.pct_change(fill_method=None).dropna(); growth=p/p.iloc[0]*100; dd=(p/p.cummax()-1)*100
-roll_ret=((1+r).rolling(12).apply(np.prod,raw=True)-1)*100
-roll_vol=r.rolling(12).std()*np.sqrt(12)*100
-ex=r-((1+RF)**(1/12)-1); roll_sr=ex.rolling(36).mean()/ex.rolling(36).std()*np.sqrt(12)
-
-line_chart({mode:p},f'{mode} — Portfolio Value','ZAR')
-line_chart({mode:growth},f'{mode} — Growth of R100','Value')
-line_chart({'Drawdown':dd},f'{mode} — Portfolio Drawdown','%')
+roll_ret=((1+r).rolling(12).apply(np.prod,raw=True)-1)*100; roll_vol=r.rolling(12).std()*np.sqrt(12)*100; ex=r-((1+RF)**(1/12)-1); roll_sr=ex.rolling(36).mean()/ex.rolling(36).std()*np.sqrt(12)
+line_chart({mode:p},f'{mode} — Portfolio Value','ZAR'); line_chart({mode:growth},f'{mode} — Growth of R100','Value'); line_chart({'Drawdown':dd},f'{mode} — Portfolio Drawdown','%')
 bar=go.Figure(go.Bar(x=r.index,y=r.values*100,name='Monthly Return')); bar.update_layout(title=f'{mode} — Monthly Portfolio Returns',xaxis_title='Date',yaxis_title='Return (%)'); st.plotly_chart(bar,use_container_width=True)
-line_chart({'12M Return':roll_ret},f'{mode} — Rolling 12-Month Return','%')
-line_chart({'12M Volatility':roll_vol},f'{mode} — Rolling 12-Month Annualised Volatility','%')
-line_chart({'36M Sharpe':roll_sr},f'{mode} — Rolling 36-Month Sharpe Ratio — RF 7%','Sharpe')
-line_chart({c:vals[c] for c in ALLOC},f'{mode} — Portfolio Sleeve Values','ZAR')
-
-st.subheader(f'{mode} Annual Returns')
-ar=annual_returns(vals); ar['Annual Return']=ar['Annual Return'].map(lambda x:f'{x:.2%}'); st.dataframe(ar,hide_index=True,use_container_width=True)
-
-weights=vals[list(ALLOC)].div(vals['PORTFOLIO'],axis=0)
-wt=pd.DataFrame({'Asset':list(ALLOC),'Initial Weight':[ALLOC[a]/INITIAL for a in ALLOC],'Ending Weight':weights.iloc[-1].values})
-wt['Initial Weight']=wt['Initial Weight'].map(lambda x:f'{x:.2%}'); wt['Ending Weight']=wt['Ending Weight'].map(lambda x:f'{x:.2%}')
-st.subheader(f'{mode} Portfolio Weights'); st.dataframe(wt,hide_index=True,use_container_width=True)
-
-# Keep the direct comparison as an additional section; nothing removed.
-st.divider(); st.subheader('Buy & Hold vs Annual Rebalancing')
-line_chart({'Buy & Hold':bh['PORTFOLIO'],'Annual Rebalanced':rb['PORTFOLIO']},'Portfolio Value Comparison','ZAR')
-comparison=pd.DataFrame({'Buy & Hold':metric_table(bhm).set_index('Metric')['Value'],'Annual Rebalanced':metric_table(rbm).set_index('Metric')['Value']}); st.dataframe(comparison,use_container_width=True)
+line_chart({'12M Return':roll_ret},f'{mode} — Rolling 12-Month Return','%'); line_chart({'12M Volatility':roll_vol},f'{mode} — Rolling 12-Month Annualised Volatility','%'); line_chart({'36M Sharpe':roll_sr},f'{mode} — Rolling 36-Month Sharpe Ratio — RF 7%','Sharpe'); line_chart({c:vals[c] for c in ALLOC},f'{mode} — Portfolio Sleeve Values','ZAR')
+st.subheader(f'{mode} Annual Returns'); ar=annual_returns(vals); ar['Annual Return']=ar['Annual Return'].map(lambda x:f'{x:.2%}'); st.dataframe(ar,hide_index=True,use_container_width=True)
+weights=vals[list(ALLOC)].div(vals['PORTFOLIO'],axis=0); wt=pd.DataFrame({'Asset':list(ALLOC),'Initial Weight':[ALLOC[a]/INITIAL for a in ALLOC],'Ending Weight':weights.iloc[-1].values}); wt['Initial Weight']=wt['Initial Weight'].map(lambda x:f'{x:.2%}'); wt['Ending Weight']=wt['Ending Weight'].map(lambda x:f'{x:.2%}'); st.subheader(f'{mode} Portfolio Weights'); st.dataframe(wt,hide_index=True,use_container_width=True)
+st.divider(); st.subheader('Buy & Hold vs Annual Rebalancing'); line_chart({'Buy & Hold':bh['PORTFOLIO'],'Annual Rebalanced':rb['PORTFOLIO']},'Portfolio Value Comparison','ZAR'); comparison=pd.DataFrame({'Buy & Hold':metric_table(bhm).set_index('Metric')['Value'],'Annual Rebalanced':metric_table(rbm).set_index('Metric')['Value']}); st.dataframe(comparison,use_container_width=True)
 
 with st.expander('Methodology & data'):
     st.write('Buy & Hold invests the original allocations once and permits weights to drift. Annual Rebalanced resets to the original target weights at the start of each calendar year. Foreign sleeves are translated into ZAR. The R400k South African equity sleeve uses FTSE/JSE All Share (^J203.JO). The R200k South African bond sleeve uses SARB KBP2013MM GOVI.')
     st.write('Yahoo data refresh hourly. GOVI is monthly and stored as the official SARB history in the repository; its latest published level is carried forward until the snapshot is updated. No synthetic daily GOVI return is invented.')
     st.write(f'SARB source loaded: {govi_source}')
+
+# Pearson correlation of the same monthly ZAR asset-return series used by the backtest.
+st.divider(); st.subheader('Asset Correlation')
+asset_returns=master[list(ALLOC)].pct_change(fill_method=None).dropna()
+corr=asset_returns.corr(method='pearson')
+mask=np.triu(np.ones(corr.shape,dtype=bool),k=1)
+net_corr=float(corr.where(mask).stack().mean())
+st.metric('Net Inter-Asset Correlation',f'{net_corr:.3f}',help='Arithmetic mean of all unique off-diagonal Pearson correlations. Each asset pair is counted once.')
+heat=go.Figure(data=go.Heatmap(z=corr.values,x=corr.columns,y=corr.index,zmin=-1,zmax=1,zmid=0,colorscale='RdBu',reversescale=True,text=np.round(corr.values,2),texttemplate='%{text:.2f}',hovertemplate='%{y} vs %{x}<br>Pearson r = %{z:.3f}<extra></extra>',colorbar=dict(title='Pearson r')))
+heat.update_layout(title='Pearson Correlation Matrix — Monthly ZAR Asset Returns',xaxis_title='',yaxis_title='',height=650)
+st.plotly_chart(heat,use_container_width=True)
+st.caption(f'Calculated from {len(asset_returns):,} common monthly observations from {asset_returns.index[0]:%b %Y} to {asset_returns.index[-1]:%b %Y}.')
