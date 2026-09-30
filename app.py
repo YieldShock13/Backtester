@@ -241,8 +241,9 @@ def load_macro_factors(daily_mode):
   out[name]=x.rename(name)
  # ICE BofA US High Yield Index Option-Adjusted Spread (FRED BAMLH0A0HYM2), percent.
  hy=pd.read_csv('https://fred.stlouisfed.org/graph/fredgraph.csv?id=BAMLH0A0HYM2')
- hy['DATE']=pd.to_datetime(hy['DATE']); hy['BAMLH0A0HYM2']=pd.to_numeric(hy['BAMLH0A0HYM2'],errors='coerce')
- hx=hy.set_index('DATE')['BAMLH0A0HYM2'].dropna().sort_index()
+ date_col='DATE' if 'DATE' in hy.columns else 'observation_date' if 'observation_date' in hy.columns else hy.columns[0]
+ hy[date_col]=pd.to_datetime(hy[date_col],errors='coerce'); hy['BAMLH0A0HYM2']=pd.to_numeric(hy['BAMLH0A0HYM2'],errors='coerce')
+ hx=hy.dropna(subset=[date_col]).set_index(date_col)['BAMLH0A0HYM2'].dropna().sort_index()
  if not daily_mode: hx=hx.resample('ME').last()
  out['HY OAS']=hx.rename('HY OAS')
  return pd.DataFrame(out)
