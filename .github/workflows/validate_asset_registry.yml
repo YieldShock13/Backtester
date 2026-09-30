@@ -1,0 +1,34 @@
+name: Validate asset registry redesign
+on:
+  push:
+    branches: [asset-registry-full-workings]
+  pull_request:
+    branches: [main]
+    paths:
+      - 'app.py'
+      - 'scripts/build_asset_registry_workings.py'
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply redesign to branch copy
+        run: python scripts/build_asset_registry_workings.py
+      - name: Compile
+        run: python -m py_compile app.py
+      - name: Regression audit
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('app.py').read_text()
+          req=['Complete Calculation Workings','Pearson Correlation Matrix','Instrument Name','Ticker / Series','Search asset','KBP2013M','Capital Gain % of Total','Income % of Total','_normalise_stxgvi_close']
+          miss=[x for x in req if x not in s]
+          if miss: raise SystemExit('Missing: '+repr(miss))
+          banned=['FX Attribution','fx_decomposition','history_metadata','Exact Yahoo Finance tickers']
+          bad=[x for x in banned if x in s]
+          if bad: raise SystemExit('Regression: '+repr(bad))
+          print('REGRESSION AUDIT: PASS')
+          PY
