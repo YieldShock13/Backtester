@@ -7,6 +7,9 @@ on:
       - 'scripts/expand_history_walkforward.py'
       - 'scripts/final_short_leverage_spearman_patch.py'
       - 'scripts/rebalancing_frequency_patch.py'
+      - 'scripts/fix_fx_weekly_alignment.py'
+      - 'scripts/correlation_diagnostics_patch.py'
+      - 'scripts/rename_linearity_labels.py'
       - '.github/workflows/add_orcas_theme.yml'
 permissions:
   contents: write
@@ -48,7 +51,8 @@ jobs:
               "st.selectbox('Backtest mode',['Buy & Hold','Rebalanced']",
               "st.selectbox('Rebalancing frequency',['Annual','Semi-Annual','Quarterly','Monthly','Weekly']",
               "freq=='Weekly'","freq=='Monthly'","freq=='Quarterly'","freq=='Semi-Annual'","freq=='Annual'",
-              "mode_label=f'{rebalance_frequency} Rebalanced'","line_chart({mode_label:p}","line_chart({mode_label:growth}"
+              "mode_label=f'{rebalance_frequency} Rebalanced'","line_chart({mode_label:p}","line_chart({mode_label:growth}",
+              "Align by portfolio week, not exact timestamp","same-week aligned observations"
           ]
           for x in required: assert x in s,x
           assert 'dropped_asset_weeks' not in s
