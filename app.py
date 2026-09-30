@@ -130,7 +130,15 @@ def resolve_instrument_names(symbols):
 def build_master(selected):
  yahoo=[x for x in selected if x!='GOVI']; yp,yd,ys=load_ticker_components(tuple(yahoo)) if yahoo else ({},{},{})
  if yahoo:
-  mp=pd.DataFrame({x:v.resample('W-FRI').last() for x,v in yp.items()}); md=pd.DataFrame({x:v.resample('W-FRI').sum() for x,v in yd.items()})
+  daily_px=pd.concat([yp[x].rename(x) for x in yahoo],axis=1)
+  mutual_daily=daily_px.dropna(how='any')
+  # For each Friday-labelled week, select the latest actual calendar date on which
+  # ALL selected assets have a genuine Close. Values remain genuine daily closes.
+  mp=mutual_daily.groupby(mutual_daily.index.to_period('W-FRI')).tail(1).copy()
+  mp.index=mp.index.to_period('W-FRI').end_time.normalize()
+  mp=mp[~mp.index.duplicated(keep='last')].sort_index()
+  # Cash distributions remain actual flows and are summed over their calendar week.
+  md=pd.DataFrame({x:yd[x].resample('W-FRI').sum() for x in yahoo}).reindex(mp.index,fill_value=0.0)
  else:
   g0=load_govi_history(); mp=pd.DataFrame(index=g0.index); md=pd.DataFrame(index=g0.index)
  g=load_govi_history(); val={'last_govi':g.index.max(),'source':'repository GOVI'}
@@ -402,7 +410,7 @@ try:
   bh=portfolio_values(prices,divs,ALLOC,REINVEST,False,fx_hedge_returns); rb=portfolio_values(prices,divs,ALLOC,REINVEST,True,fx_hedge_returns)
 except Exception as e: st.error(f'Data update/validation failed: {e}'); st.exception(e); st.stop()
 data_flags=[]
-if 'excluded_incomplete_weeks' in globals() and excluded_incomplete_weeks>0: data_flags.append(f'Weekly alignment excluded {excluded_incomplete_weeks} incomplete week(s) within the common asset history ({common_inception:%Y-%m-%d} to {common_endpoint:%Y-%m-%d}) because at least one selected asset had no genuine observation that week. Pre-inception/post-history gaps are not counted. No interpolation or cross-week price fill was used.')
+# Weekly alignment exclusions are documented in Data Audit; they are not promoted to DATA FLAGS unless they prevent the backtest.
 if 'benchmark_missing_weeks' in globals() and benchmark_missing_weeks>0: data_flags.append(f'Weekly alignment excluded {benchmark_missing_weeks} additional week(s) with no genuine benchmark observation.')
 if start>requested: data_flags.append(f'Requested start {requested:%Y-%m-%d} unavailable for the selected common asset set; backtest starts at {start:%Y-%m-%d}.')
 frequency='weekly (Friday-labelled; last available trading close)'; st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} observations | Nominal {PORTFOLIO_CCY} {INITIAL:,.0f} | RF {RF:.2%} | Dividends '+('reinvested' if REINVEST else 'retained as cash')+(' | FX beta hedge active' if FX_HEDGED and HEDGED_ASSETS else ' | FX unhedged'))
@@ -644,7 +652,7 @@ def show_audit_report():
    nb=int(wf['CAPM Forecast'].notna().sum()); add('Walk-forward','CAPM estimates available','PASS' if nb==len(wf) else 'WARNING',f'{nb}/{len(wf)} one-step CAPM forecasts available')
  if 'missing_by_asset' in globals():
   miss_txt=', '.join(f'{k}: {v}' for k,v in missing_by_asset.items() if v) or 'none'
-  add('Alignment','Complete-case weekly alignment','PASS' if excluded_incomplete_weeks==0 and benchmark_missing_weeks==0 else 'WARNING',f'Comparable common-history weeks={raw_week_count} ({common_inception:%Y-%m-%d} to {common_endpoint:%Y-%m-%d}); incomplete weeks excluded={excluded_incomplete_weeks}; benchmark-incomplete weeks excluded={benchmark_missing_weeks}; final aligned weeks={len(prices)}; missing weeks by asset={miss_txt}. Pre-inception/post-history weeks are not counted. No interpolation or cross-week forward fill.')
+  add('Alignment','Complete-case weekly alignment','PASS' if excluded_incomplete_weeks==0 and benchmark_missing_weeks==0 else 'WARNING',f'Weekly observations use the latest genuine daily date shared by all selected assets within each Friday-labelled week. Comparable weeks={raw_week_count} ({common_inception:%Y-%m-%d} to {common_endpoint:%Y-%m-%d}); unrecoverable asset weeks excluded={excluded_incomplete_weeks}; benchmark-incomplete weeks excluded={benchmark_missing_weeks}; final aligned weeks={len(prices)}. No interpolation or cross-week forward fill.')
  if 'STXGVI.JO' in ASSETS: add('Source validation','STXGVI cents/ZAR normalisation','PASS','normalisation and distribution sanity checks completed before portfolio construction')
  if 'GOVI' in ASSETS: add('Source validation','GOVI repository history','PASS' if len(govi)>=100 else 'FAIL',f'{len(govi)} repository observations; last={govi.index.max():%Y-%m-%d}')
  audit=pd.DataFrame(checks); rank={'PASS':0,'WARNING':1,'FAIL':2}; worst=max((rank[x] for x in audit.Status),default=0); overall=['PASS','WARNING','FAIL'][worst]
