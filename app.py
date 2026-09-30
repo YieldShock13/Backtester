@@ -232,7 +232,7 @@ def load_fx_pair(pair_symbol,daily_mode):
  if not daily_mode: x=x.resample('W-FRI').last()
  return x.rename(pair_symbol)
 
-def estimate_fx_hedges(prices,divs,hedged_assets,fx_pairs,daily_mode):
+def estimate_fx_hedges(prices,divs,hedged_assets,fx_pairs,daily_mode,method='In-Sample'):
  hedge=pd.DataFrame(0.0,index=prices.index,columns=prices.columns); rows=[]
  asset_total=(prices-prices.shift(1)+divs)/prices.shift(1)
  for asset in hedged_assets:
@@ -240,19 +240,30 @@ def estimate_fx_hedges(prices,divs,hedged_assets,fx_pairs,daily_mode):
   fx_raw=load_fx_pair(pair,daily_mode).dropna().sort_index()
   # Align by portfolio week, not exact timestamp. Each portfolio observation receives
   # the last genuine FX close from the same W-FRI week only; never carry across weeks.
-  fx_week=fx_raw.copy()
-  fx_week.index=fx_week.index.to_period('W-FRI').end_time.normalize()
-  fx_week=fx_week.groupby(level=0).last()
+  fx_week=fx_raw.copy(); fx_week.index=fx_week.index.to_period('W-FRI').end_time.normalize(); fx_week=fx_week.groupby(level=0).last()
   portfolio_week=pd.DatetimeIndex(prices.index).to_period('W-FRI').end_time.normalize()
-  fx=pd.Series(fx_week.reindex(portfolio_week).to_numpy(),index=prices.index,name=pair)
-  fr=fx.pct_change(fill_method=None)
+  fx=pd.Series(fx_week.reindex(portfolio_week).to_numpy(),index=prices.index,name=pair); fr=fx.pct_change(fill_method=None)
   d=pd.concat([asset_total[asset].rename('asset'),fr.rename('fx')],axis=1).dropna()
   if len(d)<12: raise RuntimeError(f'{asset}: fewer than 12 same-week aligned observations for FX beta estimation against {pair}')
-  var=float(d.fx.var()); beta=float(d.asset.cov(d.fx)/var) if var>0 else np.nan
-  if not np.isfinite(beta): raise RuntimeError(f'{asset}: FX beta could not be estimated against {pair}')
-  alpha=float(d.asset.mean()-beta*d.fx.mean()); fitted=alpha+beta*d.fx; ssr=float(((d.asset-fitted)**2).sum()); sst=float(((d.asset-d.asset.mean())**2).sum()); r2=1-ssr/sst if sst>0 else np.nan
-  hedge.loc[:,asset]=(-beta*fr).reindex(prices.index).fillna(0.0)
-  rows.append({'Instrument':asset,'FX Pair':pair,'Observations':len(d),'Alpha (periodic)':alpha,'FX Beta / Hedge Ratio':beta,'R²':r2,'Sample Start':d.index.min(),'Sample End':d.index.max()})
+  if method=='1-Period Walk-Forward':
+   beta_series=pd.Series(np.nan,index=prices.index,dtype=float)
+   for dt in d.index:
+    hist=d.loc[d.index<dt]
+    if len(hist)<12: continue
+    var=float(hist.fx.var())
+    if var>0:
+     b=float(hist.asset.cov(hist.fx)/var)
+     if np.isfinite(b): beta_series.loc[dt]=b
+   hedge.loc[:,asset]=(-beta_series*fr).reindex(prices.index).fillna(0.0)
+   valid_beta=beta_series.dropna()
+   if valid_beta.empty: raise RuntimeError(f'{asset}: insufficient prior observations for 1-period walk-forward FX hedge against {pair}')
+   rows.append({'Instrument':asset,'FX Pair':pair,'Method':'1-Period Walk-Forward','Observations':len(d),'Hedged OOS Periods':len(valid_beta),'Alpha (periodic)':np.nan,'FX Beta / Hedge Ratio':float(valid_beta.iloc[-1]),'R²':np.nan,'Sample Start':d.index.min(),'Sample End':d.index.max()})
+  else:
+   var=float(d.fx.var()); beta=float(d.asset.cov(d.fx)/var) if var>0 else np.nan
+   if not np.isfinite(beta): raise RuntimeError(f'{asset}: FX beta could not be estimated against {pair}')
+   alpha=float(d.asset.mean()-beta*d.fx.mean()); fitted=alpha+beta*d.fx; ssr=float(((d.asset-fitted)**2).sum()); sst=float(((d.asset-d.asset.mean())**2).sum()); r2=1-ssr/sst if sst>0 else np.nan
+   hedge.loc[:,asset]=(-beta*fr).reindex(prices.index).fillna(0.0)
+   rows.append({'Instrument':asset,'FX Pair':pair,'Method':'In-Sample','Observations':len(d),'Hedged OOS Periods':np.nan,'Alpha (periodic)':alpha,'FX Beta / Hedge Ratio':beta,'R²':r2,'Sample Start':d.index.min(),'Sample End':d.index.max()})
  return hedge,pd.DataFrame(rows)
 
 @st.cache_data(ttl=3600,show_spinner=False)
@@ -398,6 +409,9 @@ else:
 st.markdown('**FX Hedging**')
 fxc1,fxc2=st.columns(2)
 with fxc1: FX_HEDGED=st.toggle('FX hedged',value=False)
+FX_HEDGE_METHOD='In-Sample'
+if FX_HEDGED:
+ FX_HEDGE_METHOD=st.segmented_control('FX hedge estimation',['In-Sample','1-Period Walk-Forward'],default='In-Sample',help='In-Sample uses one beta estimated over the configured sample. 1-Period Walk-Forward estimates beta using only observations available before each week, then applies it to the next week; minimum 12 prior aligned observations.')
 with fxc2:
  BASE_CCY=PORTFOLIO_CCY
  st.text_input('Portfolio / base currency',value=BASE_CCY,disabled=True)
@@ -444,7 +458,7 @@ try:
   if len(bad): raise RuntimeError('Implausible asset return(s): '+', '.join(f'{k}={v:.1%}' for k,v in bad.items()))
   fx_hedge_returns=pd.DataFrame(0.0,index=prices.index,columns=ASSETS); fx_hedge_report=pd.DataFrame()
   if FX_HEDGED and HEDGED_ASSETS:
-   fx_hedge_returns,fx_hedge_report=estimate_fx_hedges(prices,divs,HEDGED_ASSETS,FX_PAIRS,daily_mode)
+   fx_hedge_returns,fx_hedge_report=estimate_fx_hedges(prices,divs,HEDGED_ASSETS,FX_PAIRS,daily_mode,FX_HEDGE_METHOD)
   bh=portfolio_values(prices,divs,ALLOC,REINVEST,None,fx_hedge_returns)
 except Exception as e: st.error(f'Data update/validation failed: {e}'); st.exception(e); st.stop()
 data_flags=[]
@@ -454,7 +468,7 @@ if USE_BENCHMARK and benchmark_overlap_start>prices.index.min(): st.caption(f'Po
 if start>requested: data_flags.append(f'Requested start {requested:%Y-%m-%d} unavailable for the selected common asset set; backtest starts at {start:%Y-%m-%d}.')
 frequency='weekly (Friday-labelled; last available trading close)'; st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} observations | Nominal {PORTFOLIO_CCY} {INITIAL:,.0f} | RF {RF:.2%} | Dividends '+('reinvested' if REINVEST else 'retained as cash')+(' | FX beta hedge active' if FX_HEDGED and HEDGED_ASSETS else ' | FX unhedged')+f' | Leverage {LEVERAGE:.1f}x | Financing cost {LEVERAGE_COST:.2%} p.a.')
 if FX_HEDGED and HEDGED_ASSETS and not fx_hedge_report.empty:
- st.subheader('FX Beta Hedge — In-Sample Estimates'); fxshow=fx_hedge_report.copy(); fxshow['Alpha (periodic)']=fxshow['Alpha (periodic)'].map(lambda x:f'{x:.4%}'); fxshow['FX Beta / Hedge Ratio']=fxshow['FX Beta / Hedge Ratio'].map(lambda x:f'{x:.4f}'); fxshow['R²']=fxshow['R²'].map(lambda x:f'{x:.4f}'); st.dataframe(fxshow,hide_index=True,use_container_width=True)
+ st.subheader(f'FX Beta Hedge — {FX_HEDGE_METHOD}'); fxshow=fx_hedge_report.copy(); fxshow['Alpha (periodic)']=fxshow['Alpha (periodic)'].map(lambda x:f'{x:.4%}'); fxshow['FX Beta / Hedge Ratio']=fxshow['FX Beta / Hedge Ratio'].map(lambda x:f'{x:.4f}'); fxshow['R²']=fxshow['R²'].map(lambda x:f'{x:.4f}'); st.dataframe(fxshow,hide_index=True,use_container_width=True)
 if data_flags: st.warning('DATA FLAGS — '+' | '.join(data_flags))
 mode=st.selectbox('Backtest mode',['Buy & Hold','Rebalanced'],index=0,key='backtest_mode')
 if mode=='Rebalanced':
