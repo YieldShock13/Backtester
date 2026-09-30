@@ -33,20 +33,20 @@ s=s.replace("st.latex(r'\\mathcal S_{JSE}=\\{t:DD^{JSE}_t\\le-10\\%\\}')","st.la
 s=s.replace("st.latex(r'N=252\\ \\text{(daily)}\\quad\\text{or}\\quad N=12\\ \\text{(month-end)}')","st.latex(r'N=52\\ \\text{(weekly)}')")
 p.write_text(s)
 
-# IMPORTANT: run the weekly patch whenever mutual-date synchronization is not yet in
-# the production app. Previous workflow failures happened because the generic weekly
-# markers were already present, so the new patch was skipped and app.py stayed unchanged.
+# Run patch whenever either mutual-date synchronization OR benchmark-only gap handling
+# is absent. This avoids the previous 'validated but no app.py diff' deployment failure.
 s=Path('app.py').read_text()
-if "mutual_daily=daily_px.dropna(how='any')" not in s:
+if "mutual_daily=daily_px.dropna(how='any')" not in s or "benchmark_analysis=pd.concat" not in s:
     runpy.run_path('scripts/expand_history_walkforward.py', run_name='__main__')
 
 s=p.read_text()
 assert '.orca-hero{' in s and "ORCA'S" in s
 for forbidden in ['.stApp{','[data-testid="stHeader"]{','[data-testid="stToolbar"]{','[data-testid="stMetric"]{','.stButton>button{']:
     assert forbidden not in s, forbidden
-for required in ["st.segmented_control('Currency'","Complete audit checks","Search benchmark","Oil +3σ Shock","US HY OAS +2σ Widening","benchmark_scenario_stats","Beta vs Benchmark","Benchmark={BENCHMARK}","Pearson Correlation Matrix","Show LaTeX","observation_date","interval='1d'","ppy=52","roll_n=52; sharpe_n=156","Benchmark −10% Drawdown ({bench_label} — {BENCHMARK})","\\mathcal S_{B}","period='max'","Walk-Forward Validator — 52-Week Estimation Window","GARCH(1,1)","Complete-case weekly alignment","common_inception=max(first_valid)","excluded_incomplete_weeks","mutual_daily=daily_px.dropna(how='any')","groupby(mutual_daily.index.to_period('W-FRI')).tail(1)"]:
+for required in ["st.segmented_control('Currency'","Complete audit checks","Search benchmark","Oil +3σ Shock","US HY OAS +2σ Widening","benchmark_scenario_stats","Beta vs Benchmark","Benchmark={BENCHMARK}","Pearson Correlation Matrix","Show LaTeX","observation_date","interval='1d'","ppy=52","roll_n=52; sharpe_n=156","Benchmark −10% Drawdown ({bench_label} — {BENCHMARK})","\\mathcal S_{B}","period='max'","Walk-Forward Validator — 52-Week Estimation Window","GARCH(1,1)","Complete-case weekly alignment","common_inception=max(first_valid)","excluded_incomplete_weeks","mutual_daily=daily_px.dropna(how='any')","groupby(mutual_daily.index.to_period('W-FRI')).tail(1)","benchmark_analysis=pd.concat","excluded only from benchmark-dependent analytics","portfolio history, portfolio returns, CAGR, volatility, drawdown and standalone VaR are unchanged"]:
     assert required in s, required
 assert "auto_adjust=False,actions=True" in s
 assert "['Adj Close']" not in s and '[\"Adj Close\"]' not in s
 assert 'START="2012-02-01"' not in s
 assert 'dropped_asset_weeks' not in s
+assert "aligned_index=prices.index.intersection(bp_all.dropna().index)" not in s
