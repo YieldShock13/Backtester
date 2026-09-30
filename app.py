@@ -184,19 +184,16 @@ results=search_assets(search_query) if search_query.strip() else []
 if 'asset_names' not in st.session_state: st.session_state.asset_names={}
 if results:
  labels=[f"{r['name']} — {r['symbol']}" for r in results]
- picked=st.pills('Search results',options=range(len(results)),format_func=lambda i: labels[i],selection_mode='single',key='asset_search_pick')
- if picked is not None:
+ def _select_search_asset():
+  picked=st.session_state.get('asset_search_pick')
+  if picked is None: return
   row=results[picked]; symbol=row['symbol']
   st.session_state.asset_names[symbol]=row['name']
-  if symbol not in st.session_state.selected_assets:
-   st.session_state.selected_assets.append(symbol)
-   # The multiselect is a keyed widget: its existing widget state overrides `default` on rerun.
-   # Synchronise the widget state explicitly so a clicked search result appears immediately.
-   current=list(st.session_state.get('selected_assets_widget',st.session_state.selected_assets))
-   if symbol not in current: current.append(symbol)
-   st.session_state.selected_assets_widget=current
-   st.session_state.asset_search_pick=None
-   st.rerun()
+  current=list(st.session_state.get('selected_assets_widget',st.session_state.selected_assets))
+  if symbol not in current: current.append(symbol)
+  st.session_state.selected_assets=current.copy()
+  st.session_state.selected_assets_widget=current
+ picked=st.pills('Search results',options=range(len(results)),format_func=lambda i: labels[i],selection_mode='single',key='asset_search_pick',on_change=_select_search_asset)
 ASSETS=st.multiselect('Selected assets',options=list(dict.fromkeys(st.session_state.selected_assets+DEFAULT_TICKERS+['GOVI'])),default=st.session_state.selected_assets,key='selected_assets_widget')
 st.session_state.selected_assets=ASSETS
 if not ASSETS: st.error('Select at least one asset.'); st.stop()
