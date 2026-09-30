@@ -1,0 +1,34 @@
+name: Validate configuration engine
+on:
+  push:
+    branches: [config-engine-redesign]
+    paths:
+      - 'app_configured.py'
+      - '.github/workflows/validate_config_engine.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'app_configured.py'
+      - '.github/workflows/validate_config_engine.yml'
+  workflow_dispatch:
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Syntax compile
+        run: python -m py_compile app_configured.py
+      - name: Static invariants
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('app_configured.py').read_text()
+          required=['Backtest Configuration','Show workings in LaTeX','Data Audit Report','FX Attribution to Total Return','auto_adjust=False','Adjusted Close is not used']
+          missing=[x for x in required if x not in s]
+          if missing: raise SystemExit('Missing required invariants: '+repr(missing))
+          if 'app_v2' in s or 'legacy_app' in s: raise SystemExit('Legacy/V2 namespace contamination detected')
+          print('STATIC CONFIG ENGINE CHECKS: PASS')
+          PY
