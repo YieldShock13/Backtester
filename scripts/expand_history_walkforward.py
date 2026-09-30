@@ -1,45 +1,53 @@
 from pathlib import Path
 p=Path('app.py'); s=p.read_text()
 
-# Maximum available history.
-s=s.replace('START="2012-02-01"','START=None')
-s=s.replace("h=yf.Ticker(ticker).history(start=START,interval='1d',auto_adjust=False,actions=True)","h=yf.Ticker(ticker).history(period='max',interval='1d',auto_adjust=False,actions=True)")
-s=s.replace("return mp.loc[START:],md.reindex(mp.index,fill_value=0.0).loc[START:],g,val,ys","return mp,md.reindex(mp.index,fill_value=0.0),g,val,ys")
-s=s.replace("custom_start=st.date_input('Custom start',value=pd.Timestamp(START).date())","custom_start=st.date_input('Custom start',value=pd.Timestamp('1900-01-01').date())")
+# Build weekly observations from the latest genuine DAILY date shared by every
+# selected asset in each week. This avoids throwing away a week merely because
+# different exchanges had different final trading days. No interpolation/fill.
+old="""def build_master(selected):
+ yahoo=[x for x in selected if x!='GOVI']; yp,yd,ys=load_ticker_components(tuple(yahoo)) if yahoo else ({},{},{})
+ if yahoo:
+  mp=pd.DataFrame({x:v.resample('W-FRI').last() for x,v in yp.items()}); md=pd.DataFrame({x:v.resample('W-FRI').sum() for x,v in yd.items()})
+ else:
+  g0=load_govi_history(); mp=pd.DataFrame(index=g0.index); md=pd.DataFrame(index=g0.index)
+ g=load_govi_history(); val={'last_govi':g.index.max(),'source':'repository GOVI'}
+ if 'GOVI' in selected: raise RuntimeError('Repository GOVI is monthly-only. For the weekly backtest select a Yahoo-traded bond/index proxy with daily history instead.')
+ return mp,md.reindex(mp.index,fill_value=0.0),g,val,ys
+"""
+new="""def build_master(selected):
+ yahoo=[x for x in selected if x!='GOVI']; yp,yd,ys=load_ticker_components(tuple(yahoo)) if yahoo else ({},{},{})
+ if yahoo:
+  daily_px=pd.concat([yp[x].rename(x) for x in yahoo],axis=1)
+  mutual_daily=daily_px.dropna(how='any')
+  # For each Friday-labelled week, select the latest actual calendar date on which
+  # ALL selected assets have a genuine Close. Values remain genuine daily closes.
+  mp=mutual_daily.groupby(mutual_daily.index.to_period('W-FRI')).tail(1).copy()
+  mp.index=mp.index.to_period('W-FRI').end_time.normalize()
+  mp=mp[~mp.index.duplicated(keep='last')].sort_index()
+  # Cash distributions remain actual flows and are summed over their calendar week.
+  md=pd.DataFrame({x:yd[x].resample('W-FRI').sum() for x in yahoo}).reindex(mp.index,fill_value=0.0)
+ else:
+  g0=load_govi_history(); mp=pd.DataFrame(index=g0.index); md=pd.DataFrame(index=g0.index)
+ g=load_govi_history(); val={'last_govi':g.index.max(),'source':'repository GOVI'}
+ if 'GOVI' in selected: raise RuntimeError('Repository GOVI is monthly-only. For the weekly backtest select a Yahoo-traded bond/index proxy with daily history instead.')
+ return mp,md.reindex(mp.index,fill_value=0.0),g,val,ys
+"""
+if old not in s:
+    raise RuntimeError('build_master anchor not found')
+s=s.replace(old,new)
 
-# Correct weekly alignment. Count missing weeks only inside the common investable
-# life of all selected assets; never count pre-inception/post-history gaps.
-old="asset_weekly=full_p[ASSETS]; raw_week_count=len(asset_weekly); missing_by_asset=asset_weekly.isna().sum().astype(int).to_dict(); common=asset_weekly.dropna(how='any').index; dropped_asset_weeks=raw_week_count-len(common); start,end,requested=resolve_dates(common,timeline,custom_start,custom_end,daily_mode); prices=full_p.loc[(full_p.index>=start)&(full_p.index<=end),ASSETS].dropna(how='any'); divs=full_d.reindex(prices.index,fill_value=0.0)[ASSETS]"
-new="asset_weekly=full_p[ASSETS]; first_valid=asset_weekly.apply(lambda c:c.first_valid_index()).dropna(); last_valid=asset_weekly.apply(lambda c:c.last_valid_index()).dropna(); common_inception=max(first_valid); common_endpoint=min(last_valid); comparable=asset_weekly.loc[(asset_weekly.index>=common_inception)&(asset_weekly.index<=common_endpoint)]; raw_week_count=len(comparable); missing_by_asset=comparable.isna().sum().astype(int).to_dict(); common=comparable.dropna(how='any').index; excluded_incomplete_weeks=int(comparable.isna().any(axis=1).sum()); start,end,requested=resolve_dates(common,timeline,custom_start,custom_end,daily_mode); prices=comparable.loc[(comparable.index>=start)&(comparable.index<=end),ASSETS].dropna(how='any'); divs=full_d.reindex(prices.index,fill_value=0.0)[ASSETS]"
-if old in s:
-    s=s.replace(old,new)
-elif 'common_inception=max(first_valid)' not in s:
-    raise RuntimeError('Current weekly alignment block not found')
+# The resulting weekly matrix is already synchronized across selected assets.
+# Keep the complete-case guard for genuinely unrecoverable weeks and audit them,
+# but do not elevate a tiny number of excluded weeks into the prominent DATA FLAGS banner.
+oldflag="if 'excluded_incomplete_weeks' in globals() and excluded_incomplete_weeks>0: data_flags.append(f'Weekly alignment excluded {excluded_incomplete_weeks} incomplete week(s) within the common asset history ({common_inception:%Y-%m-%d} to {common_endpoint:%Y-%m-%d}) because at least one selected asset had no genuine observation that week. Pre-inception/post-history gaps are not counted. No interpolation or cross-week price fill was used.')"
+s=s.replace(oldflag,"# Weekly alignment exclusions are documented in Data Audit; they are not promoted to DATA FLAGS unless they prevent the backtest.")
 
-oldflag="if 'dropped_asset_weeks' in globals() and dropped_asset_weeks>0: data_flags.append(f'Weekly alignment excluded {dropped_asset_weeks} asset-weeks from the union calendar because at least one selected asset had no genuine observation in that week. No interpolation or cross-week price fill was used.')"
-newflag="if 'excluded_incomplete_weeks' in globals() and excluded_incomplete_weeks>0: data_flags.append(f'Weekly alignment excluded {excluded_incomplete_weeks} incomplete week(s) within the common asset history ({common_inception:%Y-%m-%d} to {common_endpoint:%Y-%m-%d}) because at least one selected asset had no genuine observation that week. Pre-inception/post-history gaps are not counted. No interpolation or cross-week price fill was used.')"
-s=s.replace(oldflag,newflag)
-
-# Replace the stale audit implementation directly. This must run even when the
-# audit row already exists, because the old row referenced dropped_asset_weeks.
-old_audit="""if 'missing_by_asset' in globals():
-  miss_txt=', '.join(f'{k}: {v}' for k,v in missing_by_asset.items() if v) or 'none'
-  add('Alignment','Complete-case weekly alignment','PASS' if dropped_asset_weeks==0 and benchmark_missing_weeks==0 else 'WARNING',f'Raw weekly union={raw_week_count}; asset-incomplete weeks excluded={dropped_asset_weeks}; benchmark-incomplete weeks excluded={benchmark_missing_weeks}; final aligned weeks={len(prices)}; missing by asset={miss_txt}. No interpolation or cross-week forward fill.')
- """
-new_audit="""if 'missing_by_asset' in globals():
-  miss_txt=', '.join(f'{k}: {v}' for k,v in missing_by_asset.items() if v) or 'none'
-  add('Alignment','Complete-case weekly alignment','PASS' if excluded_incomplete_weeks==0 and benchmark_missing_weeks==0 else 'WARNING',f'Comparable common-history weeks={raw_week_count} ({common_inception:%Y-%m-%d} to {common_endpoint:%Y-%m-%d}); incomplete weeks excluded={excluded_incomplete_weeks}; benchmark-incomplete weeks excluded={benchmark_missing_weeks}; final aligned weeks={len(prices)}; missing weeks by asset={miss_txt}. Pre-inception/post-history weeks are not counted. No interpolation or cross-week forward fill.')
- """
-if old_audit in s:
-    s=s.replace(old_audit,new_audit)
-elif "add('Alignment','Complete-case weekly alignment'" not in s:
-    audit_anchor="if 'STXGVI.JO' in ASSETS: add('Source validation'"
-    if audit_anchor not in s: raise RuntimeError('Audit insertion anchor not found')
-    s=s.replace(audit_anchor,new_audit+audit_anchor)
+# Make the audit language describe the recovery rule accurately.
+old_a="f'Comparable common-history weeks={raw_week_count} ({common_inception:%Y-%m-%d} to {common_endpoint:%Y-%m-%d}); incomplete weeks excluded={excluded_incomplete_weeks}; benchmark-incomplete weeks excluded={benchmark_missing_weeks}; final aligned weeks={len(prices)}; missing weeks by asset={miss_txt}. Pre-inception/post-history weeks are not counted. No interpolation or cross-week forward fill.'"
+new_a="f'Weekly observations use the latest genuine daily date shared by all selected assets within each Friday-labelled week. Comparable weeks={raw_week_count} ({common_inception:%Y-%m-%d} to {common_endpoint:%Y-%m-%d}); unrecoverable asset weeks excluded={excluded_incomplete_weeks}; benchmark-incomplete weeks excluded={benchmark_missing_weeks}; final aligned weeks={len(prices)}. No interpolation or cross-week forward fill.'"
+s=s.replace(old_a,new_a)
 
 p.write_text(s)
 s=p.read_text()
-for req in ["period='max'","common_inception=max(first_valid)","excluded_incomplete_weeks","Complete-case weekly alignment","Pre-inception/post-history gaps are not counted","No interpolation or cross-week price fill"]:
+for req in ["mutual_daily=daily_px.dropna(how='any')","groupby(mutual_daily.index.to_period('W-FRI')).tail(1)","latest genuine daily date shared by all selected assets","No interpolation or cross-week forward fill"]:
     assert req in s, req
-assert 'dropped_asset_weeks' not in s
-assert 'START="2012-02-01"' not in s
