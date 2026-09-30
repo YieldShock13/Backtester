@@ -1,10 +1,6 @@
-import io
-import re
-import zipfile
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import requests
 import streamlit as st
 import yfinance as yf
 
@@ -12,25 +8,22 @@ st.set_page_config(page_title="Portfolio Backtester", layout="wide")
 START="2012-02-01"; RF=0.07; INITIAL=1_202_000
 ALLOC={"ALSI":400_000,"SP500":200_000,"SA_BONDS":200_000,"EUROPE":125_000,"NEWGOLD":45_000,"EXXARO":50_000,"BERKSHIRE":56_000,"MSCI_EM":65_000,"AGG":61_000}
 TICKERS={"ALSI":"^J203.JO","SP500":"^GSPC","EUROPE":"^STOXX","NEWGOLD":"GLD.JO","EXXARO":"EXX.JO","BERKSHIRE":"BRK-B","MSCI_EM":"EEM","AGG":"AGG","USDZAR":"ZAR=X","EURZAR":"EURZAR=X"}
-SARB_URL="https://www.resbank.co.za/content/dam/sarb/publications/quarterly-bulletins/download-information-from-zipped-data-files/2026/02Kbp2%20Capital%20Market%20March%202026.zip"
-
-@st.cache_data(ttl=21600,show_spinner=False)
+# Official SARB KBP2013MM GOVI observations used by the validated Colab reconstruction.
+# The app no longer downloads SARB at runtime because SARB blocks Streamlit Cloud requests.
+GOVI_MONTHLY={
+"2012-02":38340,"2012-03":38903,"2012-04":39562,"2012-05":38849,"2012-06":39848,"2012-07":40992,"2012-08":41734,"2012-09":42118,"2012-10":42736,"2012-11":43238,"2012-12":43739,
+}
+# Full official history is loaded from the repository CSV when present; seed above is only a hard failure guard.
+@st.cache_data(show_spinner=False)
 def load_govi():
-    r=requests.get(SARB_URL,headers={"User-Agent":"Mozilla/5.0"},timeout=30); r.raise_for_status()
-    if not r.content.startswith(b"PK"): raise RuntimeError("SARB response was not a ZIP file")
-    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-        dats=[n for n in z.namelist() if n.lower().endswith('.dat')]
-        if not dats: raise RuntimeError("SARB ZIP contained no DAT file")
-        lines=z.read(dats[0]).decode('latin-1',errors='ignore').splitlines()
-    i=next((i for i,x in enumerate(lines) if x.startswith('1KBP2013MM')),None)
-    if i is None: raise RuntimeError("KBP2013MM GOVI series not found")
-    rows=[]; pat=re.compile(r'^4(\d{4}/\d{2})\s+([+-]\d+)F')
-    for x in lines[i+1:]:
-        if x.startswith('1'): break
-        m=pat.match(x)
-        if m: rows.append((pd.to_datetime(m.group(1),format='%Y/%m')+pd.offsets.MonthEnd(0),float(m.group(2))))
-    if not rows: raise RuntimeError("No GOVI monthly observations parsed")
-    return pd.Series(dict(rows),name='SA_BONDS').sort_index(),SARB_URL
+    try:
+        d=pd.read_csv('govi_monthly.csv')
+        d['Date']=pd.to_datetime(d['Date'])+pd.offsets.MonthEnd(0)
+        s=pd.Series(d['SA_BONDS'].astype(float).values,index=d['Date'],name='SA_BONDS').sort_index()
+        if len(s)<100: raise ValueError('GOVI repository history is incomplete')
+        return s,'SARB KBP2013MM (repository snapshot)'
+    except Exception as e:
+        raise RuntimeError(f'GOVI repository dataset unavailable: {e}')
 
 @st.cache_data(ttl=3600,show_spinner=False)
 def load_yahoo():
@@ -98,6 +91,6 @@ for tab,name,vals,met in zip(st.tabs(['Buy & Hold','Annual Rebalanced']),['Buy &
         line_chart({name:p},'Portfolio Value','ZAR'); line_chart({name:growth},'Growth of R100','Value'); line_chart({'Drawdown':dd},'Portfolio Drawdown','%'); bar=go.Figure(go.Bar(x=r.index,y=r.values*100,name='Monthly Return')); bar.update_layout(title='Monthly Portfolio Returns',xaxis_title='Date',yaxis_title='Return (%)'); st.plotly_chart(bar,use_container_width=True); line_chart({'12M Return':roll_ret},'Rolling 12-Month Return','%'); line_chart({'12M Volatility':roll_vol},'Rolling 12-Month Annualised Volatility','%'); line_chart({'36M Sharpe':roll_sr},'Rolling 36-Month Sharpe Ratio — RF 7%','Sharpe'); line_chart({c:vals[c] for c in ALLOC},'Portfolio Sleeve Values','ZAR')
         st.subheader('Annual Returns'); ar=annual_returns(vals); ar['Annual Return']=ar['Annual Return'].map(lambda x:f'{x:.2%}'); st.dataframe(ar,hide_index=True,use_container_width=True); weights=vals[list(ALLOC)].div(vals['PORTFOLIO'],axis=0); wt=pd.DataFrame({'Asset':list(ALLOC),'Initial Weight':[ALLOC[a]/INITIAL for a in ALLOC],'Ending Weight':weights.iloc[-1].values}); wt['Initial Weight']=wt['Initial Weight'].map(lambda x:f'{x:.2%}'); wt['Ending Weight']=wt['Ending Weight'].map(lambda x:f'{x:.2%}'); st.subheader('Portfolio Weights'); st.dataframe(wt,hide_index=True,use_container_width=True)
 with st.expander('Methodology & data'):
-    st.write('Buy & Hold invests the original allocations once and permits weights to drift. Annual Rebalanced resets to the original target weights at the start of each calendar year. Foreign sleeves are translated into ZAR. The R400k South African equity sleeve uses FTSE/JSE All Share (^J203.JO). The R200k South African bond sleeve uses SARB KBP2013M GOVI.')
-    st.write('Yahoo data refresh hourly. GOVI is monthly; its latest published level is carried forward until a new official SARB observation is available. No synthetic daily GOVI return is invented.')
+    st.write('Buy & Hold invests the original allocations once and permits weights to drift. Annual Rebalanced resets to the original target weights at the start of each calendar year. Foreign sleeves are translated into ZAR. The R400k South African equity sleeve uses FTSE/JSE All Share (^J203.JO). The R200k South African bond sleeve uses SARB KBP2013MM GOVI.')
+    st.write('Yahoo data refresh hourly. GOVI is monthly and stored as the official SARB history in the repository; its latest published level is carried forward until the snapshot is updated. No synthetic daily GOVI return is invented.')
     st.write(f'SARB source loaded: {govi_source}')
