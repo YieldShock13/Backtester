@@ -8,12 +8,7 @@ st.set_page_config(page_title="Portfolio Backtester", layout="wide")
 START="2012-02-01"; RF=0.07; INITIAL=1_202_000
 ALLOC={"ALSI":400_000,"SP500":200_000,"SA_BONDS":200_000,"EUROPE":125_000,"NEWGOLD":45_000,"EXXARO":50_000,"BERKSHIRE":56_000,"MSCI_EM":65_000,"AGG":61_000}
 TICKERS={"ALSI":"^J203.JO","SP500":"^GSPC","EUROPE":"^STOXX","NEWGOLD":"GLD.JO","EXXARO":"EXX.JO","BERKSHIRE":"BRK-B","MSCI_EM":"EEM","AGG":"AGG","USDZAR":"ZAR=X","EURZAR":"EURZAR=X"}
-# Official SARB KBP2013MM GOVI observations used by the validated Colab reconstruction.
-# The app no longer downloads SARB at runtime because SARB blocks Streamlit Cloud requests.
-GOVI_MONTHLY={
-"2012-02":38340,"2012-03":38903,"2012-04":39562,"2012-05":38849,"2012-06":39848,"2012-07":40992,"2012-08":41734,"2012-09":42118,"2012-10":42736,"2012-11":43238,"2012-12":43739,
-}
-# Full official history is loaded from the repository CSV when present; seed above is only a hard failure guard.
+
 @st.cache_data(show_spinner=False)
 def load_govi():
     try:
@@ -81,15 +76,51 @@ try:
     with st.spinner('Updating market data…'): master,govi,govi_source=build_master(); bh=buy_hold(master); rb=annual_rebalanced(master)
 except Exception as e:
     st.error(f'Data update failed: {e}'); st.exception(e); st.stop()
-bhm,rbm=metrics(bh),metrics(rb); st.success(f'Data loaded through {master.index[-1]:%d %b %Y} | SARB GOVI through {govi.index[-1]:%d %b %Y}')
-c1,c2,c3,c4=st.columns(4); c1.metric('Buy & Hold Value',f"R{bhm['Ending Value']:,.0f}"); c2.metric('Buy & Hold CAGR',f"{bhm['CAGR']:.2%}"); c3.metric('Sharpe (7% RF)',f"{bhm['Sharpe Ratio (RF 7%)']:.3f}"); c4.metric('Max Drawdown',f"{bhm['Maximum Drawdown']:.2%}")
-st.subheader('Buy & Hold vs Annual Rebalancing'); line_chart({'Buy & Hold':bh['PORTFOLIO'],'Annual Rebalanced':rb['PORTFOLIO']},'Portfolio Value','ZAR')
+
+bhm,rbm=metrics(bh),metrics(rb)
+st.success(f'Data loaded through {master.index[-1]:%d %b %Y} | SARB GOVI through {govi.index[-1]:%d %b %Y}')
+
+# One control drives ALL single-portfolio outputs below.
+mode=st.radio('Backtest mode',['Buy & Hold','Annual Rebalanced'],horizontal=True,index=0)
+vals=bh if mode=='Buy & Hold' else rb
+met=bhm if mode=='Buy & Hold' else rbm
+
+c1,c2,c3,c4=st.columns(4)
+c1.metric(f'{mode} Value',f"R{met['Ending Value']:,.0f}")
+c2.metric(f'{mode} CAGR',f"{met['CAGR']:.2%}")
+c3.metric('Sharpe (7% RF)',f"{met['Sharpe Ratio (RF 7%)']:.3f}")
+c4.metric('Max Drawdown',f"{met['Maximum Drawdown']:.2%}")
+
+st.subheader(f'{mode} Analytics')
+st.dataframe(metric_table(met),hide_index=True,use_container_width=True)
+
+p=vals['PORTFOLIO']; r=p.pct_change(fill_method=None).dropna(); growth=p/p.iloc[0]*100; dd=(p/p.cummax()-1)*100
+roll_ret=((1+r).rolling(12).apply(np.prod,raw=True)-1)*100
+roll_vol=r.rolling(12).std()*np.sqrt(12)*100
+ex=r-((1+RF)**(1/12)-1); roll_sr=ex.rolling(36).mean()/ex.rolling(36).std()*np.sqrt(12)
+
+line_chart({mode:p},f'{mode} — Portfolio Value','ZAR')
+line_chart({mode:growth},f'{mode} — Growth of R100','Value')
+line_chart({'Drawdown':dd},f'{mode} — Portfolio Drawdown','%')
+bar=go.Figure(go.Bar(x=r.index,y=r.values*100,name='Monthly Return')); bar.update_layout(title=f'{mode} — Monthly Portfolio Returns',xaxis_title='Date',yaxis_title='Return (%)'); st.plotly_chart(bar,use_container_width=True)
+line_chart({'12M Return':roll_ret},f'{mode} — Rolling 12-Month Return','%')
+line_chart({'12M Volatility':roll_vol},f'{mode} — Rolling 12-Month Annualised Volatility','%')
+line_chart({'36M Sharpe':roll_sr},f'{mode} — Rolling 36-Month Sharpe Ratio — RF 7%','Sharpe')
+line_chart({c:vals[c] for c in ALLOC},f'{mode} — Portfolio Sleeve Values','ZAR')
+
+st.subheader(f'{mode} Annual Returns')
+ar=annual_returns(vals); ar['Annual Return']=ar['Annual Return'].map(lambda x:f'{x:.2%}'); st.dataframe(ar,hide_index=True,use_container_width=True)
+
+weights=vals[list(ALLOC)].div(vals['PORTFOLIO'],axis=0)
+wt=pd.DataFrame({'Asset':list(ALLOC),'Initial Weight':[ALLOC[a]/INITIAL for a in ALLOC],'Ending Weight':weights.iloc[-1].values})
+wt['Initial Weight']=wt['Initial Weight'].map(lambda x:f'{x:.2%}'); wt['Ending Weight']=wt['Ending Weight'].map(lambda x:f'{x:.2%}')
+st.subheader(f'{mode} Portfolio Weights'); st.dataframe(wt,hide_index=True,use_container_width=True)
+
+# Keep the direct comparison as an additional section; nothing removed.
+st.divider(); st.subheader('Buy & Hold vs Annual Rebalancing')
+line_chart({'Buy & Hold':bh['PORTFOLIO'],'Annual Rebalanced':rb['PORTFOLIO']},'Portfolio Value Comparison','ZAR')
 comparison=pd.DataFrame({'Buy & Hold':metric_table(bhm).set_index('Metric')['Value'],'Annual Rebalanced':metric_table(rbm).set_index('Metric')['Value']}); st.dataframe(comparison,use_container_width=True)
-for tab,name,vals,met in zip(st.tabs(['Buy & Hold','Annual Rebalanced']),['Buy & Hold','Annual Rebalanced'],[bh,rb],[bhm,rbm]):
-    with tab:
-        st.subheader(f'{name} Analytics'); st.dataframe(metric_table(met),hide_index=True,use_container_width=True); p=vals['PORTFOLIO']; r=p.pct_change(fill_method=None).dropna(); growth=p/p.iloc[0]*100; dd=(p/p.cummax()-1)*100; roll_ret=((1+r).rolling(12).apply(np.prod,raw=True)-1)*100; roll_vol=r.rolling(12).std()*np.sqrt(12)*100; ex=r-((1+RF)**(1/12)-1); roll_sr=ex.rolling(36).mean()/ex.rolling(36).std()*np.sqrt(12)
-        line_chart({name:p},'Portfolio Value','ZAR'); line_chart({name:growth},'Growth of R100','Value'); line_chart({'Drawdown':dd},'Portfolio Drawdown','%'); bar=go.Figure(go.Bar(x=r.index,y=r.values*100,name='Monthly Return')); bar.update_layout(title='Monthly Portfolio Returns',xaxis_title='Date',yaxis_title='Return (%)'); st.plotly_chart(bar,use_container_width=True); line_chart({'12M Return':roll_ret},'Rolling 12-Month Return','%'); line_chart({'12M Volatility':roll_vol},'Rolling 12-Month Annualised Volatility','%'); line_chart({'36M Sharpe':roll_sr},'Rolling 36-Month Sharpe Ratio — RF 7%','Sharpe'); line_chart({c:vals[c] for c in ALLOC},'Portfolio Sleeve Values','ZAR')
-        st.subheader('Annual Returns'); ar=annual_returns(vals); ar['Annual Return']=ar['Annual Return'].map(lambda x:f'{x:.2%}'); st.dataframe(ar,hide_index=True,use_container_width=True); weights=vals[list(ALLOC)].div(vals['PORTFOLIO'],axis=0); wt=pd.DataFrame({'Asset':list(ALLOC),'Initial Weight':[ALLOC[a]/INITIAL for a in ALLOC],'Ending Weight':weights.iloc[-1].values}); wt['Initial Weight']=wt['Initial Weight'].map(lambda x:f'{x:.2%}'); wt['Ending Weight']=wt['Ending Weight'].map(lambda x:f'{x:.2%}'); st.subheader('Portfolio Weights'); st.dataframe(wt,hide_index=True,use_container_width=True)
+
 with st.expander('Methodology & data'):
     st.write('Buy & Hold invests the original allocations once and permits weights to drift. Annual Rebalanced resets to the original target weights at the start of each calendar year. Foreign sleeves are translated into ZAR. The R400k South African equity sleeve uses FTSE/JSE All Share (^J203.JO). The R200k South African bond sleeve uses SARB KBP2013MM GOVI.')
     st.write('Yahoo data refresh hourly. GOVI is monthly and stored as the official SARB history in the repository; its latest published level is carried forward until the snapshot is updated. No synthetic daily GOVI return is invented.')
