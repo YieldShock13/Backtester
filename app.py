@@ -41,33 +41,45 @@ def load_stxgvi():
  for dt,dv in div[div!=0].items():
   p=close.asof(dt)
   if np.isfinite(p) and (dv<=0 or dv/p>.20): raise RuntimeError(f'STXGVI distribution sanity check failed on {dt.date()}: dividend_ZAR={dv}, close_ZAR={p}')
- # Return raw split-normalised price and cash distributions separately.
- # Dividends are NOT reinvested. build_bond_series holds fixed ETF units and accumulates distributions as cash.
  return close,div,splits
 
 @st.cache_data(ttl=3600,show_spinner=False)
 def load_yahoo():
- raw=yf.download(list(TICKERS.values()),start=START,auto_adjust=False,actions=False,progress=False,group_by='column')
- if raw.empty: raise RuntimeError('Yahoo Finance returned no data')
- adj=raw['Adj Close'].rename(columns={v:k for k,v in TICKERS.items()})
- for c in ['NEWGOLD','EXXARO']: adj[c]=adj[c]/100.0
- adj['USDZAR']=adj['USDZAR'].ffill(); adj['EURZAR']=adj['EURZAR'].ffill(); z=pd.DataFrame(index=adj.index)
- for c in ['ALSI','NEWGOLD','EXXARO']: z[c]=adj[c]
- for c in ['SP500','BERKSHIRE','MSCI_EM','AGG']: z[c]=adj[c]*adj['USDZAR']
- z['EUROPE']=adj['EUROPE']*adj['EURZAR']; return z
+ histories={}
+ for asset,ticker in TICKERS.items():
+  h=yf.Ticker(ticker).history(start=START,auto_adjust=False,actions=True)
+  if h.empty: raise RuntimeError(f'Yahoo Finance returned no data for {ticker}')
+  h=h.copy(); h.index=pd.to_datetime(h.index).tz_localize(None); h=h.sort_index()
+  close=pd.to_numeric(h['Close'],errors='coerce')
+  div=pd.to_numeric(h.get('Dividends',0.0),errors='coerce').fillna(0.0)
+  splits=pd.to_numeric(h.get('Stock Splits',0.0),errors='coerce').fillna(0.0)
+  if asset in ['NEWGOLD','EXXARO']:
+   close=close/100.0; div=div/100.0
+  histories[asset]=(close,div,splits)
+ usdzar=histories['USDZAR'][0].ffill(); eurzar=histories['EURZAR'][0].ffill()
+ z=pd.DataFrame()
+ for asset in ['ALSI','SP500','EUROPE','NEWGOLD','EXXARO','BERKSHIRE','MSCI_EM','AGG']:
+  close,div,splits=histories[asset]
+  if asset in ['SP500','BERKSHIRE','MSCI_EM','AGG']:
+   fx=usdzar.reindex(close.index).ffill()
+  elif asset=='EUROPE':
+   fx=eurzar.reindex(close.index).ffill()
+  else:
+   fx=pd.Series(1.0,index=close.index)
+  pzar=close*fx; dzar=div*fx
+  first=pzar.first_valid_index()
+  if first is None: raise RuntimeError(f'No valid raw Close for {asset}')
+  units=1.0/float(pzar.loc[first])
+  wealth=units*pzar + (units*dzar.fillna(0.0)).cumsum()
+  wealth.name=asset; z=pd.concat([z,wealth],axis=1)
+ return z.sort_index()
 
 def build_bond_series(govi,stx_close,stx_divs):
- last_govi=govi.index.max(); pre=govi.copy()
- # Anchor the ETF holding at the last available trading close on/before the GOVI splice date.
- px_anchor=float(stx_close.asof(last_govi))
+ last_govi=govi.index.max(); pre=govi.copy(); px_anchor=float(stx_close.asof(last_govi))
  if not np.isfinite(px_anchor) or px_anchor<=0: raise RuntimeError('No valid STXGVI price available to anchor continuation')
- anchor=float(pre.iloc[-1]); units=anchor/px_anchor
- # Fixed units after the splice; distributions accumulate as cash and are never reinvested.
- daily=stx_close.loc[stx_close.index>last_govi]
+ anchor=float(pre.iloc[-1]); units=anchor/px_anchor; daily=stx_close.loc[stx_close.index>last_govi]
  if daily.empty: return pre.rename('SA_BONDS'),{'last_govi':last_govi,'extension_months':0,'max_extension_return':np.nan}
- cash=stx_divs.reindex(daily.index,fill_value=0.0).cumsum()*units
- wealth=units*daily+cash
- post=wealth.resample('ME').last()
+ cash=stx_divs.reindex(daily.index,fill_value=0.0).cumsum()*units; wealth=units*daily+cash; post=wealth.resample('ME').last()
  bridge=pd.concat([pd.Series([anchor],index=[last_govi]),post]); extret=bridge.pct_change(fill_method=None).dropna()
  if (extret.abs()>.20).any():
   dt=extret.abs().idxmax(); raise RuntimeError(f'SA-bond continuation sanity check failed on {dt.date()}: {extret.loc[dt]:.2%}')
@@ -95,8 +107,7 @@ def annual_rebalanced(m):
 
 def validate_portfolios(m,bh,rb):
  if not np.isclose(bh.PORTFOLIO.iloc[0],INITIAL) or not np.isclose(rb.PORTFOLIO.iloc[0],INITIAL): raise RuntimeError('Portfolio start-value reconciliation failed')
- direct=m.div(m.iloc[0]).mul(pd.Series(ALLOC),axis=1).sum(axis=1)
- err=(bh.PORTFOLIO-direct).abs().max()
+ direct=m.div(m.iloc[0]).mul(pd.Series(ALLOC),axis=1).sum(axis=1); err=(bh.PORTFOLIO-direct).abs().max()
  if err>.01: raise RuntimeError(f'Buy-and-hold reconciliation failed: max error R{err:.4f}')
  for name,v in [('Buy & Hold',bh),('Annual Rebalanced',rb)]:
   if not np.allclose(v[list(ALLOC)].sum(axis=1),v.PORTFOLIO,rtol=0,atol=.01): raise RuntimeError(f'{name} sleeve reconciliation failed')
@@ -134,7 +145,7 @@ def conditional_beta(v,m):
  if len(s)<2:return np.nan,len(s),s
  return (s.P-mrf).cov(s.M-mrf)/(s.M-mrf).var(),len(s),s
 
-st.title('Portfolio Backtester'); st.caption('Live Yahoo Finance | SA bonds: SARB GOVI through Feb-2026, then Satrix GOVI ETF continuation using fixed units + cash distributions (no dividend reinvestment) | Starting capital R1,202,000 | RF 7%')
+st.title('Portfolio Backtester'); st.caption('Raw Yahoo Close only | Cash dividends retained, never reinvested | Yahoo Close already split-normalised | SA bonds: GOVI through Feb-2026, then STXGVI fixed units + cash distributions | Starting capital R1,202,000 | RF 7%')
 try:
  with st.spinner('Updating and validating market data…'):
   master,govi,stxgvi,stx_divs,stx_splits,bond_validation=build_master(); bh=buy_hold(master); rb=annual_rebalanced(master); validate_portfolios(master,bh,rb)
@@ -152,7 +163,7 @@ st.dataframe(aar,hide_index=True,use_container_width=True)
 weights=vals[list(ALLOC)].div(vals.PORTFOLIO,axis=0); wt=pd.DataFrame({'Asset':list(ALLOC),'Initial Weight':[ALLOC[a]/INITIAL for a in ALLOC],'Ending Weight':weights.iloc[-1].values}); wt['Initial Weight']=wt['Initial Weight'].map(lambda x:f'{x:.2%}'); wt['Ending Weight']=wt['Ending Weight'].map(lambda x:f'{x:.2%}'); st.subheader(f'{mode} Portfolio Weights'); st.dataframe(wt,hide_index=True,use_container_width=True)
 st.divider(); st.subheader('Buy & Hold vs Annual Rebalancing'); line_chart({'Buy & Hold':bh.PORTFOLIO,'Annual Rebalanced':rb.PORTFOLIO},'Portfolio Value Comparison','ZAR'); st.dataframe(pd.DataFrame({'Buy & Hold':metric_table(bhm).set_index('Metric').Value,'Annual Rebalanced':metric_table(rbm).set_index('Metric').Value}),use_container_width=True)
 with st.expander('Methodology & data'):
- st.write('Buy & Hold permits weights to drift. Annual Rebalanced resets to original target weights at the start of each calendar year. Foreign sleeves are translated into ZAR. SA equity uses FTSE/JSE All Share (^J203.JO).')
+ st.write('Buy & Hold permits weights to drift. Annual Rebalanced resets to original target weights at the start of each calendar year. All Yahoo sleeves use raw Close, never Adjusted Close. Yahoo raw Close is already split-normalised, so split events are not applied a second time. Foreign prices and cash dividends are translated into ZAR. Dividends/distributions accumulate as cash and are never reinvested. SA equity uses FTSE/JSE All Share (^J203.JO).')
  st.write('SA bonds use repository GOVI through February 2026. Later months use STXGVI. At the splice, the GOVI index value buys a fixed number of STXGVI units. Those units remain fixed and all subsequent ETF cash distributions accumulate separately as cash; distributions are not reinvested. Yahoo JSE quotation-unit breaks are normalised before the splice. Monthly continuation moves above 20% are rejected. Portfolio sleeves must reconcile to portfolio value.')
 st.divider(); st.subheader('Asset Correlation'); asset_returns=master[list(ALLOC)].pct_change(fill_method=None).dropna(); corr=asset_returns.corr(); mask=np.triu(np.ones(corr.shape,dtype=bool),k=1); net_corr=float(corr.where(mask).stack().mean()); st.metric('Net Inter-Asset Correlation',f'{net_corr:.3f}'); heat=go.Figure(data=go.Heatmap(z=corr.values,x=corr.columns,y=corr.index,zmin=-1,zmax=1,zmid=0,colorscale='RdBu',reversescale=True,text=np.round(corr.values,2),texttemplate='%{text:.2f}')); heat.update_layout(title='Pearson Correlation Matrix'); st.plotly_chart(heat,use_container_width=True)
 st.divider(); st.subheader(f'{mode} — Beta & Alpha Evolution vs ALSI'); roll_beta,roll_alpha=rolling_capm(vals,master); line_chart({'36M Rolling Beta':roll_beta},f'{mode} — 36-Month Rolling Beta vs ALSI','Beta'); line_chart({'36M Rolling Alpha':roll_alpha*100},f'{mode} — 36-Month Rolling Annualised CAPM Alpha','Alpha (%)'); cb,nobs,stress=conditional_beta(vals,master); st.metric('Conditional Beta — ALSI Drawdown ≥10%', 'N/A' if not np.isfinite(cb) else f'{cb:.3f}'); st.caption(f'Conditional beta estimated using {nobs} monthly observations where ALSI was at least 10% below its prior peak.')
