@@ -5,6 +5,7 @@ on:
     paths:
       - 'scripts/isolate_orcas_header.py'
       - 'scripts/expand_history_walkforward.py'
+      - 'scripts/final_short_leverage_spearman_patch.py'
       - '.github/workflows/add_orcas_theme.yml'
 permissions:
   contents: write
@@ -31,19 +32,24 @@ jobs:
               "ORCA'S","CAPITAL STRATEGIES","auto_adjust=False","Show LaTeX","period='max'",
               "Walk-Forward Validator — 52-Week Estimation Window","GARCH(1,1)",
               "common_inception=max(first_valid)","excluded_incomplete_weeks","Complete-case weekly alignment",
-              "Correlation method", "['Pearson','Spearman']", "corr_method.lower()",
-              "min_value=-500.0", "Net exposure must equal 100%",
-              "Use leverage", "Leverage (x)", "Annual financing cost (%)",
-              "apply_leverage", "financing_cost", "LEVERAGE", "FINANCING_COST",
-              "Not financial advice", "subject to revision"
+              "Benchmark (optional)","USE_BENCHMARK=st.toggle('Use benchmark'",
+              "benchmark_overlap_start=max(prices.index.min(),bench_valid.index.min())",
+              "Only those benchmark-dependent observations are dropped","Portfolio history begins",
+              "Negative weight = short position","Portfolio leverage (x)",
+              "Annual leverage / financing cost (%)","Correlation measure",
+              "['Pearson','Spearman']","corr(method=corr_method.lower())",
+              "levered_r=LEVERAGE*base_r-(LEVERAGE-1.0)*weekly_financing",
+              "Not financial advice. Outputs are for research/informational purposes only and are subject to revision."
           ]
           for x in required:
               assert x in s,x
           assert 'dropped_asset_weeks' not in s
           assert 'START="2012-02-01"' not in s
           assert s.count('st.set_page_config(')==1
-          assert "min_value=0.0,max_value=100.0" not in s
-          print('PASS: shorts, leverage, financing, correlation selector and disclaimer validated')
+          assert "st.number_input(f'{a0} (%)',0.0,100.0" not in s
+          assert "aligned_index=prices.index.intersection" not in s
+          assert "benchmark_missing_weeks=int(bp_all.reindex(prices.index).isna().sum())" not in s
+          print('PASS: optional benchmark, shorts, leverage, financing, correlation selector and disclaimer validated')
           PY
       - name: Commit validated app
         run: |
