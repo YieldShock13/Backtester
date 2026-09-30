@@ -11,7 +11,6 @@ DEFAULT_INITIAL=1_202_000
 DEFAULT_TICKERS=["^J203.JO","^GSPC","STXGVI.JO","GLD.JO","EXX.JO","BRK-B","EEM","AGG"]
 DEFAULT_WEIGHTS={"^J203.JO":0.3328,"^GSPC":0.1664,"STXGVI.JO":0.1664,"GLD.JO":0.0374,"EXX.JO":0.0416,"BRK-B":0.0466,"EEM":0.0541,"AGG":0.0507}
 BENCHMARK_TICKER="^J203.JO"
-
 SHORT_WINDOWS={'1W','1M','3M','6M','1Y'}
 
 @st.cache_data(show_spinner=False)
@@ -21,82 +20,41 @@ def load_govi_history():
  if len(s)<100: raise RuntimeError('Validated GOVI history is incomplete')
  return s
 
-def _normalise_stxgvi_close(close):
- s=close.astype(float).copy().dropna(); ratios=s/s.shift(1)
- breaks=ratios[(ratios>50)&(ratios<150)].index.tolist()+ratios[(ratios>.005)&(ratios<.02)].index.tolist()
- for dt in sorted(set(breaks)):
-  i=s.index.get_loc(dt); ratio=s.iloc[i]/s.iloc[i-1]
-  if ratio>50: s.iloc[i:]=s.iloc[i:]/100.0
-  elif ratio<.02: s.iloc[i:]=s.iloc[i:]*100.0
- if float(s.tail(min(60,len(s))).median())>1000: s=s/100.0
- if not (20<float(s.iloc[-1])<200): raise RuntimeError(f'STXGVI normalised close implausible: {s.iloc[-1]:.2f} ZAR')
- return s
-
-@st.cache_data(ttl=3600,show_spinner=False)
-def load_stxgvi():
- h=yf.Ticker('STXGVI.JO').history(start='2023-03-01',auto_adjust=False,actions=True)
- if h.empty: raise RuntimeError('Yahoo returned no STXGVI history')
- h=h.copy(); h.index=pd.to_datetime(h.index).tz_localize(None); h=h.sort_index()
- close=_normalise_stxgvi_close(pd.to_numeric(h['Close'],errors='coerce'))
- div=pd.to_numeric(h.get('Dividends',0.0),errors='coerce').fillna(0.0)/100.0
- first_date=pd.Timestamp('2023-04-25')
- if first_date not in div.index or not np.isclose(float(div.loc[first_date]),1.9145,rtol=0,atol=.0001):
-  got=float(div.loc[first_date]) if first_date in div.index else np.nan
-  raise RuntimeError(f'STXGVI distribution conversion failed: 2023-04-25={got} ZAR, expected 1.9145 ZAR')
- for dt,dv in div[div!=0].items():
-  p=close.asof(dt)
-  if np.isfinite(p) and (dv<=0 or dv/p>.20): raise RuntimeError(f'STXGVI distribution sanity check failed on {dt.date()}: dividend_ZAR={dv}, close_ZAR={p}')
- return close,div
-
 @st.cache_data(ttl=3600,show_spinner=False)
 def load_ticker_components(tickers):
- prices={}; divs={}; splits={}; metadata={}
+ prices={}; divs={}; splits={}
  for ticker in tickers:
-  obj=yf.Ticker(ticker); h=obj.history(start=START,auto_adjust=False,actions=True)
+  h=yf.Ticker(ticker).history(start=START,auto_adjust=False,actions=True)
   if h.empty: raise RuntimeError(f'Yahoo Finance returned no data for exact ticker {ticker}')
   h=h.copy(); h.index=pd.to_datetime(h.index).tz_localize(None); h=h.sort_index()
-  close=pd.to_numeric(h['Close'],errors='coerce').dropna(); div=pd.to_numeric(h.get('Dividends',0.0),errors='coerce').fillna(0.0).reindex(close.index,fill_value=0.0); sp=pd.to_numeric(h.get('Stock Splits',0.0),errors='coerce').fillna(0.0).reindex(close.index,fill_value=0.0)
+  close=pd.to_numeric(h['Close'],errors='coerce').dropna()
+  div=pd.to_numeric(h.get('Dividends',0.0),errors='coerce').fillna(0.0).reindex(close.index,fill_value=0.0)
+  sp=pd.to_numeric(h.get('Stock Splits',0.0),errors='coerce').fillna(0.0).reindex(close.index,fill_value=0.0)
   if len(close)<2: raise RuntimeError(f'{ticker}: fewer than two valid Close observations')
   prices[ticker]=close.rename(ticker); divs[ticker]=div.rename(ticker); splits[ticker]=sp.rename(ticker)
-  try: metadata[ticker]=obj.history_metadata or {}
-  except Exception: metadata[ticker]={}
- return prices,divs,splits,metadata
-
-def build_bond_components(govi,stx_close,stx_divs):
- last_govi=govi.index.max(); anchor=float(govi.iloc[-1]); px_anchor=float(stx_close.asof(last_govi))
- if not np.isfinite(px_anchor) or px_anchor<=0: raise RuntimeError('No valid STXGVI price available to anchor continuation')
- units=anchor/px_anchor; daily=stx_close.loc[stx_close.index>last_govi]
- if daily.empty: return govi.rename('SA_BONDS'),pd.Series(0.0,index=govi.index,name='SA_BONDS'),{'last_govi':last_govi,'extension_months':0,'max_extension_return':np.nan,'stx_units_per_index':units}
- post_price=(units*daily).resample('ME').last(); daily_div=units*stx_divs.reindex(daily.index,fill_value=0.0); post_div=daily_div.resample('ME').sum()
- price=pd.concat([govi,post_price]); price=price[~price.index.duplicated(keep='last')].sort_index().rename('SA_BONDS')
- div=pd.Series(0.0,index=price.index,name='SA_BONDS'); div.loc[post_div.index]=post_div.values
- bridge=pd.concat([pd.Series([anchor],index=[last_govi]),post_price]).sort_index(); extret=bridge.pct_change(fill_method=None); extret.loc[post_div.index]=extret.loc[post_div.index]+post_div/bridge.shift(1).reindex(post_div.index); extret=extret.dropna()
- if (extret.abs()>.20).any():
-  dt=extret.abs().idxmax(); raise RuntimeError(f'SA-bond continuation sanity check failed on {dt.date()}: {extret.loc[dt]:.2%}')
- return price,div,{'last_govi':last_govi,'extension_months':len(post_price),'max_extension_return':float(extret.abs().max()),'stx_anchor_price':px_anchor,'stx_units_per_index':units}
+ return prices,divs,splits
 
 def build_master(selected):
- yahoo=[x for x in selected if x!='GOVI']; yp,yd,ys,meta=load_ticker_components(tuple(yahoo)) if yahoo else ({},{},{},{})
+ yahoo=[x for x in selected if x!='GOVI']; yp,yd,ys=load_ticker_components(tuple(yahoo)) if yahoo else ({},{},{})
  if yahoo:
   mp=pd.DataFrame({x:v.resample('ME').last() for x,v in yp.items()}); md=pd.DataFrame({x:v.resample('ME').sum() for x,v in yd.items()})
  else:
   g0=load_govi_history(); mp=pd.DataFrame(index=g0.index); md=pd.DataFrame(index=g0.index)
  g=load_govi_history(); val={'last_govi':g.index.max(),'source':'repository GOVI'}
  if 'GOVI' in selected: mp['GOVI']=g.reindex(mp.index).ffill(); md['GOVI']=0.0
- return mp.loc[START:],md.reindex(mp.index,fill_value=0.0).loc[START:],g,val,meta,ys
+ return mp.loc[START:],md.reindex(mp.index,fill_value=0.0).loc[START:],g,val,ys
 
 def build_daily(selected):
  if 'GOVI' in selected: raise RuntimeError('GOVI is monthly-only. For daily analysis use an explicit investable Yahoo ticker such as STXGVI.JO.')
- yp,yd,ys,meta=load_ticker_components(tuple(selected)); dp=pd.concat(yp.values(),axis=1); dd=pd.concat(yd.values(),axis=1).reindex(dp.index,fill_value=0.0); g=load_govi_history(); val={'last_govi':g.index.max(),'source':'repository GOVI'}
- return dp,dd,g,val,meta,ys
+ yp,yd,ys=load_ticker_components(tuple(selected)); dp=pd.concat(yp.values(),axis=1); dd=pd.concat(yd.values(),axis=1).reindex(dp.index,fill_value=0.0); g=load_govi_history(); val={'last_govi':g.index.max(),'source':'repository GOVI'}
+ return dp,dd,g,val,ys
 
 def resolve_dates(index,timeline,custom_start,custom_end,daily=False):
  end=index.max()
  if timeline=='All': requested=index.min()
  elif timeline=='Custom': requested=pd.Timestamp(custom_start); end=min(pd.Timestamp(custom_end),end)
  else:
-  offsets={'1W':pd.DateOffset(weeks=1),'1M':pd.DateOffset(months=1),'3M':pd.DateOffset(months=3),'6M':pd.DateOffset(months=6),'1Y':pd.DateOffset(years=1),'3Y':pd.DateOffset(years=3),'5Y':pd.DateOffset(years=5),'10Y':pd.DateOffset(years=10)}
-  requested=end-offsets[timeline]
+  offsets={'1W':pd.DateOffset(weeks=1),'1M':pd.DateOffset(months=1),'3M':pd.DateOffset(months=3),'6M':pd.DateOffset(months=6),'1Y':pd.DateOffset(years=1),'3Y':pd.DateOffset(years=3),'5Y':pd.DateOffset(years=5),'10Y':pd.DateOffset(years=10)}; requested=end-offsets[timeline]
  available=index[(index>=requested)&(index<=end)]
  if len(available)==0: raise RuntimeError('No observations in requested timeline')
  return available[0],available[-1],requested
@@ -151,14 +109,11 @@ def conditional_beta(v,market_price,threshold=-.10):
  rp=v.PORTFOLIO.pct_change(fill_method=None); rm=market_price.pct_change(fill_method=None); dd=market_price/market_price.cummax()-1; d=pd.concat([rp.rename('P'),rm.rename('M'),dd.rename('DD')],axis=1).dropna(); d=d[d.DD<=threshold]
  return d.P.cov(d.M)/d.M.var() if len(d)>=2 and d.M.var()>0 else np.nan,len(d)
 
-title_col, report_col1, report_col2 = st.columns([8,1,1])
+title_col, report_col1, report_col2=st.columns([8,1,1])
 with title_col: st.title('Portfolio Backtester')
-latex_slot=report_col1.empty()
-audit_slot=report_col2.empty()
-st.subheader('Backtest Configuration')
-a,b,c,d=st.columns(4)
+latex_slot=report_col1.empty(); audit_slot=report_col2.empty(); st.subheader('Backtest Configuration'); a,b,c,d=st.columns(4)
 with a: timeline=st.selectbox('Timeline',['1W','1M','3M','6M','1Y','3Y','5Y','10Y','All','Custom'],index=8)
-with b: INITIAL=float(st.number_input('Nominal amount (ZAR)',min_value=1.0,value=float(DEFAULT_INITIAL),step=10000.0))
+with b: INITIAL=float(st.number_input('Nominal amount',min_value=1.0,value=float(DEFAULT_INITIAL),step=10000.0))
 with c: RF=float(st.number_input('Risk-free rate (%)',min_value=0.0,max_value=100.0,value=7.0,step=.25))/100
 with d: REINVEST=st.toggle('Reinvest dividends/distributions',value=False)
 custom_start=custom_end=None
@@ -166,129 +121,56 @@ if timeline=='Custom':
  x,y=st.columns(2)
  with x: custom_start=st.date_input('Custom start',value=pd.Timestamp(START).date())
  with y: custom_end=st.date_input('Custom end',value=pd.Timestamp.today().date())
-ticker_text=st.text_input('Exact Yahoo Finance tickers (comma-separated; GOVI is the repository series)',value=','.join(DEFAULT_TICKERS),help='Any Yahoo Finance ticker may be entered using its exact symbol. Example: STXGVI.JO. No automatic FX overlay is applied.')
+ticker_text=st.text_input('Exact Yahoo Finance tickers (comma-separated; GOVI is the repository series)',value=','.join(DEFAULT_TICKERS),help='Any Yahoo Finance ticker may be entered using its exact symbol. No automatic FX overlay is applied.')
 ASSETS=list(dict.fromkeys([x.strip().upper() for x in ticker_text.split(',') if x.strip()]))
 if not ASSETS: st.error('Enter at least one exact ticker.'); st.stop()
-st.markdown('**Weights**'); cols=st.columns(3); raww={}
-default_sum=sum(DEFAULT_WEIGHTS.get(x,0.0) for x in ASSETS)
+st.markdown('**Weights**'); cols=st.columns(3); raww={}; default_sum=sum(DEFAULT_WEIGHTS.get(x,0.0) for x in ASSETS)
 for i,a0 in enumerate(ASSETS):
  default=(DEFAULT_WEIGHTS.get(a0,0.0)/default_sum*100) if default_sum>0 else 100/len(ASSETS)
  with cols[i%3]: raww[a0]=st.number_input(f'{a0} (%)',0.0,100.0,float(default),.25,key=f'w_{a0}')/100
 if sum(raww.values())<=0: st.error('Weights must be positive.'); st.stop()
 weights={a0:w/sum(raww.values()) for a0,w in raww.items()}; ALLOC={a0:INITIAL*w for a0,w in weights.items()}
-if not np.isclose(sum(ALLOC.values()),INITIAL,atol=.01): st.error('Allocation reconciliation failed.'); st.stop()
-
-custom_days=(pd.Timestamp(custom_end)-pd.Timestamp(custom_start)).days if timeline=='Custom' and custom_start and custom_end else None
-daily_mode=timeline in SHORT_WINDOWS or (timeline=='Custom' and custom_days is not None and custom_days<=366)
-ppy=252 if daily_mode else 12
+custom_days=(pd.Timestamp(custom_end)-pd.Timestamp(custom_start)).days if timeline=='Custom' and custom_start and custom_end else None; daily_mode=timeline in SHORT_WINDOWS or (timeline=='Custom' and custom_days is not None and custom_days<=366); ppy=252 if daily_mode else 12
 try:
  with st.spinner('Updating, configuring and validating market data…'):
-  if daily_mode: full_p,full_d,govi,bond_validation,source_meta,split_events=build_daily(ASSETS)
-  else: full_p,full_d,govi,bond_validation,source_meta,split_events=build_master(ASSETS)
+  if daily_mode: full_p,full_d,govi,bond_validation,split_events=build_daily(ASSETS)
+  else: full_p,full_d,govi,bond_validation,split_events=build_master(ASSETS)
   common=full_p[ASSETS].dropna().index; start,end,requested=resolve_dates(common,timeline,custom_start,custom_end,daily_mode); prices=full_p.loc[(full_p.index>=start)&(full_p.index<=end),ASSETS].dropna(); divs=full_d.reindex(prices.index,fill_value=0.0)[ASSETS]
   if len(prices)<2: raise RuntimeError('Selected timeline has fewer than two common observations')
   asset_r=(prices-prices.shift(1)+divs)/prices.shift(1); bad=asset_r.abs().max(); bad=bad[bad>(.35 if daily_mode else 1.0)]
   if len(bad): raise RuntimeError('Implausible asset return(s): '+', '.join(f'{k}={v:.1%}' for k,v in bad.items()))
   bh=portfolio_values(prices,divs,ALLOC,REINVEST,False); rb=portfolio_values(prices,divs,ALLOC,REINVEST,True)
-  for name,v in [('Buy & Hold',bh),('Annual Rebalanced',rb)]:
-   if not np.isclose(v.PORTFOLIO.iloc[0],INITIAL,atol=.01): raise RuntimeError(f'{name} start-value reconciliation failed')
-   if not np.allclose(v[ASSETS].sum(axis=1),v.PORTFOLIO,atol=.01,rtol=0): raise RuntimeError(f'{name} sleeve reconciliation failed')
 except Exception as e: st.error(f'Data update/validation failed: {e}'); st.exception(e); st.stop()
-
 data_flags=[]
-if start>requested:
- data_flags.append(f'Requested start {requested:%Y-%m-%d} unavailable for the selected common asset set; backtest starts at {start:%Y-%m-%d}.')
-frequency='daily' if daily_mode else 'month-end'
-if 'GOVI' in ASSETS:
- data_flags.append(f'GOVI is a repository monthly total-return index series through {bond_validation["last_govi"]:%d %b %Y}; it is not a Yahoo ticker.')
-st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} observations | Nominal R{INITIAL:,.0f} | RF {RF:.2%} | Dividends '+('reinvested' if REINVEST else 'retained as cash'))
-if data_flags:
- st.warning('DATA FLAGS — ' + ' | '.join(data_flags))
-
+if start>requested: data_flags.append(f'Requested start {requested:%Y-%m-%d} unavailable for the selected common asset set; backtest starts at {start:%Y-%m-%d}.')
+frequency='daily' if daily_mode else 'month-end'; st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} observations | Nominal {INITIAL:,.0f} | RF {RF:.2%} | Dividends '+('reinvested' if REINVEST else 'retained as cash'))
+if data_flags: st.warning('DATA FLAGS — '+' | '.join(data_flags))
 mode=st.radio('Backtest mode',['Buy & Hold','Annual Rebalanced'],horizontal=True,index=0); vals=bh if mode=='Buy & Hold' else rb
-bench_p,bench_d,_,_=load_ticker_components((BENCHMARK_TICKER,)); bp=bench_p[BENCHMARK_TICKER].reindex(prices.index).ffill(); bd=bench_d[BENCHMARK_TICKER].reindex(prices.index,fill_value=0.0); market_r=(bp-bp.shift(1)+bd)/bp.shift(1); met=stats(vals,market_r,RF,ppy)
-c1,c2,c3,c4=st.columns(4); c1.metric(f'{mode} Value',f"R{met['Ending Value']:,.0f}"); c2.metric(f'{mode} CAGR',f"{met['CAGR']:.2%}"); c3.metric(f'Sharpe ({RF:.2%} RF)',f"{met['Sharpe Ratio']:.3f}"); c4.metric('Max Drawdown',f"{met['Maximum Drawdown']:.2%}")
+bench_p,bench_d,_=load_ticker_components((BENCHMARK_TICKER,)); bp=bench_p[BENCHMARK_TICKER].reindex(prices.index).ffill(); bd=bench_d[BENCHMARK_TICKER].reindex(prices.index,fill_value=0.0); market_r=(bp-bp.shift(1)+bd)/bp.shift(1); met=stats(vals,market_r,RF,ppy)
+c1,c2,c3,c4=st.columns(4); c1.metric(f'{mode} Value',f"{met['Ending Value']:,.0f}"); c2.metric(f'{mode} CAGR',f"{met['CAGR']:.2%}"); c3.metric(f'Sharpe ({RF:.2%} RF)',f"{met['Sharpe Ratio']:.3f}"); c4.metric('Max Drawdown',f"{met['Maximum Drawdown']:.2%}")
 st.subheader(f'{mode} Analytics'); st.dataframe(metric_table(met),hide_index=True,use_container_width=True)
 p=vals.PORTFOLIO; r=p.pct_change(fill_method=None).dropna(); growth=p/p.iloc[0]*100; dd=(p/p.cummax()-1)*100; roll_n=252 if daily_mode else 12; sharpe_n=756 if daily_mode else 36; roll_ret=((1+r).rolling(roll_n).apply(np.prod,raw=True)-1)*100; roll_vol=r.rolling(roll_n).std()*np.sqrt(ppy)*100; ex=r-((1+RF)**(1/ppy)-1); roll_sr=ex.rolling(sharpe_n).mean()/ex.rolling(sharpe_n).std()*np.sqrt(ppy)
-line_chart({mode:p},f'{mode} — Portfolio Value','ZAR'); line_chart({mode:growth},f'{mode} — Growth of R100','Value'); line_chart({'Drawdown':dd},f'{mode} — Portfolio Drawdown','%'); bar=go.Figure(go.Bar(x=r.index,y=r.values*100)); bar.update_layout(title=f'{mode} — {"Daily" if daily_mode else "Monthly"} Portfolio Total Returns',yaxis_title='Total Return (%)'); st.plotly_chart(bar,use_container_width=True); line_chart({'Rolling 1Y Total Return':roll_ret},f'{mode} — Rolling 1-Year Total Return','%'); line_chart({'Rolling 1Y Volatility':roll_vol},f'{mode} — Rolling 1-Year Annualised Volatility','%'); line_chart({'Rolling 3Y Sharpe':roll_sr},f'{mode} — Rolling 3-Year Sharpe Ratio','Sharpe'); line_chart({c0:vals[c0] for c0 in ASSETS},f'{mode} — Portfolio Sleeve Values','ZAR')
+line_chart({mode:p},f'{mode} — Portfolio Value','Value'); line_chart({mode:growth},f'{mode} — Growth of 100','Value'); line_chart({'Drawdown':dd},f'{mode} — Portfolio Drawdown','%'); line_chart({'Rolling 1Y Total Return':roll_ret},f'{mode} — Rolling 1-Year Total Return','%'); line_chart({'Rolling 1Y Volatility':roll_vol},f'{mode} — Rolling 1-Year Annualised Volatility','%'); line_chart({'Rolling 3Y Sharpe':roll_sr},f'{mode} — Rolling 3-Year Sharpe Ratio','Sharpe'); line_chart({c0:vals[c0] for c0 in ASSETS},f'{mode} — Portfolio Sleeve Values','Value')
 st.subheader(f'{mode} Annual Total Returns'); ar=annual_returns(vals); ar['Annual Total Return']=ar['Annual Total Return'].map(lambda x:f'{x:.2%}'); st.dataframe(ar,hide_index=True,use_container_width=True)
-st.subheader('Annual Total Return by Asset Class'); aar=annual_asset_returns(prices,divs,ASSETS)
+st.subheader('Annual Total Return by Ticker'); aar=annual_asset_returns(prices,divs,ASSETS)
 for c0 in ASSETS: aar[c0]=aar[c0].map(lambda x:f'{x:.2%}' if pd.notna(x) else 'N/A')
 st.dataframe(aar,hide_index=True,use_container_width=True)
-st.subheader('Return Attribution by Ticker — Capital Gain vs Income')
-attr=[]
+st.subheader('Return Attribution by Ticker — Capital Gain vs Income'); attr=[]
 for a0 in ASSETS:
- p0=float(prices[a0].iloc[0]); p1=float(prices[a0].iloc[-1]); cap=(p1-p0)/p0; inc=float(divs[a0].iloc[1:].sum())/p0; total=cap+inc
- attr.append({'Ticker':a0,'Total Return':total,'Capital Gain':cap,'Income / Distributions':inc,'Capital Gain % of Total':cap/total if not np.isclose(total,0) else np.nan,'Income % of Total':inc/total if not np.isclose(total,0) else np.nan})
+ p0=float(prices[a0].iloc[0]); p1=float(prices[a0].iloc[-1]); cap=(p1-p0)/p0; inc=float(divs[a0].iloc[1:].sum())/p0; total=cap+inc; attr.append({'Ticker':a0,'Total Return':total,'Capital Gain':cap,'Income / Distributions':inc,'Capital Gain % of Total':cap/total if not np.isclose(total,0) else np.nan,'Income % of Total':inc/total if not np.isclose(total,0) else np.nan})
 at=pd.DataFrame(attr)
-for c0 in ['Total Return','Capital Gain','Income / Distributions','Capital Gain % of Total','Income % of Total']: at[c0]=at[c0].map(lambda x:f'{x:.2%}' if pd.notna(x) else 'N/A')
+for c0 in at.columns[1:]: at[c0]=at[c0].map(lambda x:f'{x:.2%}' if pd.notna(x) else 'N/A')
 st.dataframe(at,hide_index=True,use_container_width=True)
-st.caption('Holding-period identity: total return = capital gain + explicit cash income/distributions. Attribution percentages are each component as a proportion of that ticker’s total return.')
-weights_end=vals[ASSETS].div(vals.PORTFOLIO,axis=0); wt=pd.DataFrame({'Asset':ASSETS,'Initial Weight':[weights[a0] for a0 in ASSETS],'Ending Weight':weights_end.iloc[-1].values}); wt['Initial Weight']=wt['Initial Weight'].map(lambda x:f'{x:.2%}'); wt['Ending Weight']=wt['Ending Weight'].map(lambda x:f'{x:.2%}'); st.subheader(f'{mode} Portfolio Weights'); st.dataframe(wt,hide_index=True,use_container_width=True)
-st.divider(); st.subheader('Buy & Hold vs Annual Rebalancing'); line_chart({'Buy & Hold':bh.PORTFOLIO,'Annual Rebalanced':rb.PORTFOLIO},'Portfolio Value Comparison','ZAR'); bhm=stats(bh,market_r,RF,ppy); rbm=stats(rb,market_r,RF,ppy); st.dataframe(pd.DataFrame({'Buy & Hold':metric_table(bhm).set_index('Metric').Value,'Annual Rebalanced':metric_table(rbm).set_index('Metric').Value}),use_container_width=True)
-st.divider(); st.subheader('Asset Correlation'); corr=asset_r[ASSETS].dropna().corr(); mask=np.triu(np.ones(corr.shape,dtype=bool),k=1); stacked=corr.where(mask).stack(); net_corr=float(stacked.mean()) if len(stacked) else np.nan; st.metric('Net Inter-Asset Correlation','N/A' if not np.isfinite(net_corr) else f'{net_corr:.3f}'); heat=go.Figure(data=go.Heatmap(z=corr.values,x=corr.columns,y=corr.index,zmin=-1,zmax=1,zmid=0,colorscale='RdBu',reversescale=True,text=np.round(corr.values,2),texttemplate='%{text:.2f}')); heat.update_layout(title='Pearson Correlation Matrix'); st.plotly_chart(heat,use_container_width=True)
-st.divider(); st.subheader(f'{mode} — Beta & Alpha Evolution vs {BENCHMARK_TICKER}'); roll_beta,roll_alpha,capm_window=rolling_capm(vals,market_r,RF,ppy); line_chart({f'{capm_window}-period Rolling Beta':roll_beta},f'{mode} — Rolling Beta vs {BENCHMARK_TICKER}','Beta'); line_chart({f'{capm_window}-period Rolling Alpha':roll_alpha*100},f'{mode} — Rolling Annualised CAPM Alpha','Alpha (%)'); cb,ncb=conditional_beta(vals,bp); st.metric(f'Conditional Beta — {BENCHMARK_TICKER} drawdown ≥10%', 'N/A' if not np.isfinite(cb) else f'{cb:.3f}', help=f'Calculated from {ncb} configured observations where {BENCHMARK_TICKER} was at least 10% below its running peak.')
+weights_end=vals[ASSETS].div(vals.PORTFOLIO,axis=0); wt=pd.DataFrame({'Ticker':ASSETS,'Initial Weight':[weights[a0] for a0 in ASSETS],'Ending Weight':weights_end.iloc[-1].values}); wt['Initial Weight']=wt['Initial Weight'].map(lambda x:f'{x:.2%}'); wt['Ending Weight']=wt['Ending Weight'].map(lambda x:f'{x:.2%}'); st.subheader(f'{mode} Portfolio Weights'); st.dataframe(wt,hide_index=True,use_container_width=True)
+st.divider(); st.subheader('Asset Correlation'); corr=asset_r[ASSETS].dropna().corr(); st.dataframe(corr,use_container_width=True)
+st.divider(); st.subheader(f'{mode} — Beta & Alpha Evolution vs {BENCHMARK_TICKER}'); roll_beta,roll_alpha,capm_window=rolling_capm(vals,market_r,RF,ppy); line_chart({f'{capm_window}-period Rolling Beta':roll_beta},f'{mode} — Rolling Beta vs {BENCHMARK_TICKER}','Beta'); line_chart({f'{capm_window}-period Rolling Alpha':roll_alpha*100},f'{mode} — Rolling Annualised CAPM Alpha','Alpha (%)'); cb,ncb=conditional_beta(vals,bp); st.metric(f'Conditional Beta — {BENCHMARK_TICKER} drawdown ≥10%','N/A' if not np.isfinite(cb) else f'{cb:.3f}')
 
-@st.dialog('Full Calculation Workings', width='large')
+@st.dialog('Full Calculation Workings',width='large')
 def show_latex_report():
- st.caption(f'Configured run: {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} | N={ppy}')
- st.header('Data & total-return construction')
- st.write('Each Yahoo instrument uses the exact user-entered ticker with history(auto_adjust=False, actions=True). Close is the price series; Dividends is explicit cash income; Stock Splits is captured for audit. Adjusted Close is never used. No FX overlay is applied.')
- st.latex(r'r_{a,t}=\frac{P_{a,t}-P_{a,t-1}+D_{a,t}}{P_{a,t-1}}')
- st.latex(r'R^{hold}_{a}=\frac{P_{a,T}-P_{a,0}+\sum_{t=1}^{T}D_{a,t}}{P_{a,0}}')
- st.latex(r'R^{hold}_{a}=R^{capital}_{a}+R^{income}_{a}')
- st.latex(r'CapitalShare_a=R^{capital}_a/R^{hold}_a,\quad IncomeShare_a=R^{income}_a/R^{hold}_a')
- st.header('Portfolio construction')
- st.latex(r'n_{a,0}=\\frac{w_a V_0}{P_{a,0}}')
- st.latex(r'V^{cash}_{a,t}=n_{a,t}P_{a,t}+C_{a,t},\\quad C_{a,t}=C_{a,t-1}+n_{a,t}D_{a,t}')
- st.latex(r'n^{reinv}_{a,t}=n_{a,t-1}+\\frac{n_{a,t-1}D_{a,t}}{P_{a,t}}')
- st.latex(r'V_t=\\sum_a V_{a,t}')
- st.header('Return & risk statistics')
- st.latex(r'R=\\frac{V_T}{V_0}-1,\\qquad CAGR=\\left(\\frac{V_T}{V_0}\\right)^{1/Y}-1')
- st.latex(r'\\sigma_{ann}=\\sigma_p\\sqrt{N},\\qquad r_{f,p}=(1+r_f)^{1/N}-1')
- st.latex(r'Sharpe=\\frac{\\overline{r_p-r_{f,p}}}{\\sigma(r_p-r_{f,p})}\\sqrt{N}')
- st.latex(r'\\sigma_{down}=\\sqrt{N}\\sqrt{E[(r_p-r_f)^2\\mid r_p-r_f<0]}')
- st.latex(r'Sortino=\\frac{N\\,\\overline{r_p-r_f}}{\\sigma_{down}}')
- st.latex(r'DD_t=\\frac{V_t}{\\max_{s\\le t}V_s}-1,\\qquad MDD=\\min_t DD_t')
- st.latex(r'Calmar=\\frac{CAGR}{|MDD|}')
- st.latex(r'VaR_{95}=Q_{0.05}(r_p),\\qquad CVaR_{95}=E[r_p\\mid r_p\\le VaR_{95}]')
- st.header('Market sensitivity')
- st.latex(r'\\beta=\\frac{Cov(r_p-r_f,r_m-r_f)}{Var(r_m-r_f)}')
- st.latex(r'\\alpha_p=\\overline{r_p-r_f}-\\beta\\overline{r_m-r_f},\\qquad \\alpha_{ann}=(1+\\alpha_p)^N-1')
- st.latex(r'\\beta_{cond}=\\frac{Cov(r_p,r_m\\mid DD_m\\le -10\\%)}{Var(r_m\\mid DD_m\\le -10\\%)}')
- st.header('Rolling analytics')
- st.latex(r'R_{1Y,t}=\\prod_{i=t-N+1}^{t}(1+r_i)-1')
- st.latex(r'\\sigma_{1Y,t}=sd(r_{t-N+1:t})\\sqrt{N}')
- st.latex(r'Sharpe_{3Y,t}=\\frac{mean(r-r_f)}{sd(r-r_f)}\\sqrt{N}')
- st.caption('N is 252 for daily runs and 12 for month-end runs. Annual rebalancing resets sleeves to configured target weights at the first observation of each new calendar year.')
+ st.header('Data & total-return construction'); st.write('Exact user-entered Yahoo ticker; history(auto_adjust=False, actions=True). Raw Close plus explicit Dividends. Adjusted Close is not used and no FX overlay is applied.'); st.latex(r'r_{a,t}=\frac{P_{a,t}-P_{a,t-1}+D_{a,t}}{P_{a,t-1}}'); st.latex(r'R^{hold}_{a}=\frac{P_{a,T}-P_{a,0}+\sum D_{a,t}}{P_{a,0}}'); st.latex(r'R^{hold}_{a}=R^{capital}_{a}+R^{income}_{a}'); st.latex(r'CapitalShare_a=R^{capital}_a/R^{hold}_a,\quad IncomeShare_a=R^{income}_a/R^{hold}_a'); st.header('Portfolio construction'); st.latex(r'n_{a,0}=\frac{w_a V_0}{P_{a,0}}'); st.latex(r'V_t=\sum_a V_{a,t}')
 
-@st.dialog('Full Data Audit', width='large')
+@st.dialog('Full Data Audit',width='large')
 def show_audit_report():
- st.caption(f'Configured run: {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency}')
- st.header('Run flags')
- if data_flags:
-  for flag in data_flags: st.warning(flag)
- else: st.success('No data flags for the configured run.')
- st.header('Sources & transformations')
- st.write('**Yahoo instruments** — exact user-entered Yahoo Finance ticker symbols; history(auto_adjust=False, actions=True). Close, Dividends and Stock Splits are captured. Adjusted Close is not used. No automatic FX overlay is applied.')
- st.write('**Repository series** — GOVI is the only non-Yahoo selectable series and is monthly-only. STXGVI.JO or any other investable proxy must be selected explicitly by exact Yahoo ticker.')
- st.write(f'**Observation frequency** — {frequency}. 1W, 1M, 3M, 6M, 1Y and custom windows ≤366 days use observed daily data; longer windows use month-end observations.')
- st.write('**Corporate actions** — Yahoo Close from auto_adjust=False is used; Stock Splits are captured for audit and are not applied a second time. Cash dividends/distributions are explicit and follow the selected reinvestment setting.')
- st.write(f'**GOVI cutoff** — {bond_validation["last_govi"]:%d %b %Y}. GOVI is never interpolated into fake daily observations.')
- st.header('Coverage & validation')
- st.write(f'**Selected assets** — {", ".join(ASSETS)}')
- st.write(f'**Common validated window** — {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y}; {len(prices):,} observations.')
- st.write('**Common coverage rule** — every calculation uses the same selected assets and common configured date window. Missing requested history is surfaced as a run flag.')
- st.write('**Hard return sanity check** — absolute single-period asset moves above 35% in daily mode or 100% in month-end mode stop the run.')
- st.write('**Accounting checks** — starting nominal reconciles; sleeve values sum to portfolio value; total return is built from raw Close plus explicit cash distributions.')
- st.header('Known source/model risks')
- st.write('Yahoo source revisions or corporate-action corrections; ETF distribution unit conventions; instrument-proxy basis at the GOVI/STXGVI splice; and differences between selected proxies and investable execution prices.')
- st.header('Current run status')
- st.write('Accounting identities: PASS')
- st.write('Return sanity checks: PASS')
- st.write('Common-history validation: PASS')
-
-if latex_slot.button('LaTeX', use_container_width=True, help='Open the complete calculation methodology'):
- show_latex_report()
-if audit_slot.button('Data Audit', use_container_width=True, help='Open the complete data audit for this configured run'):
- show_audit_report()
+ st.header('Sources & transformations'); st.write('Yahoo instruments use exact user-entered ticker symbols with history(auto_adjust=False, actions=True). Close, Dividends and Stock Splits are captured as plain pandas series. Adjusted Close is not used. No automatic FX overlay is applied.'); st.write('GOVI is the only repository series and is monthly-only.'); st.write(f'Configured window: {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y}; {len(prices):,} observations.')
+if latex_slot.button('LaTeX',use_container_width=True): show_latex_report()
+if audit_slot.button('Data Audit',use_container_width=True): show_audit_report()
