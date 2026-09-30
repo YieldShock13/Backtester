@@ -204,19 +204,41 @@ def load_macro_factors(daily_mode):
   out[name]=x.rename(name)
  return pd.DataFrame(out)
 
-def macro_scenario_stats(vals,market_price,factor_series,mask,rf,ppy,label,definition):
- rp=vals.PORTFOLIO.pct_change(fill_method=None).rename('P')
- rm=market_price.pct_change(fill_method=None).rename('M')
- f=factor_series.rename('F') if factor_series is not None else pd.Series(index=rp.index,dtype=float,name='F')
- d=pd.concat([rp,rm,f],axis=1).reindex(rp.index)
- d['Stress']=mask.reindex(d.index,fill_value=False).astype(bool)
- d=d.dropna(subset=['P','M']); stress=d[d.Stress]
- n=len(stress); rfp=(1+rf)**(1/ppy)-1
- beta=alpha=np.nan
- if n>=2 and stress.M.var()>0:
-  x=stress.M-rfp; y=stress.P-rfp; beta=y.cov(x)/x.var()
-  a=y.mean()-beta*x.mean(); alpha=(1+a)**ppy-1 if 1+a>0 else np.nan
- return {'Scenario':label,'Definition':definition,'Stress Obs':n,'Portfolio Return':(1+stress.P).prod()-1 if n else np.nan,'Avg Portfolio Return':stress.P.mean() if n else np.nan,'Annualised Volatility':stress.P.std()*np.sqrt(ppy) if n>=2 else np.nan,'Conditional Beta':beta,'Conditional Alpha':alpha,'Positive Periods':(stress.P>0).mean() if n else np.nan,'Worst Portfolio Period':stress.P.min() if n else np.nan,'Avg JSE Period Return During Regime':stress.M.mean() if n else np.nan}
+def _conditional_capm(period_returns,market_returns,rf,ppy):
+ d=pd.concat([period_returns.rename('P'),market_returns.rename('M')],axis=1).dropna(); n=len(d)
+ if n<2 or d.M.var()<=0: return np.nan,np.nan,n
+ rfp=(1+rf)**(1/ppy)-1; x=d.M-rfp; y=d.P-rfp; beta=y.cov(x)/x.var(); alpha=y.mean()-beta*x.mean()
+ return beta,alpha,n
+
+def jse_drawdown_events(vals,market_price,threshold=-.10):
+ # Independent peak-to-first-threshold-crossing historical episodes. A new event cannot begin until a new high is established.
+ p=market_price.dropna().sort_index(); events=[]; peak_date=p.index[0]; peak=float(p.iloc[0]); armed=True
+ for dt,px in p.iloc[1:].items():
+  px=float(px)
+  if px>=peak:
+   peak=px; peak_date=dt; armed=True; continue
+  dd=px/peak-1
+  if armed and dd<=threshold:
+   if peak_date in vals.index and dt in vals.index:
+    events.append((peak_date,dt,float(dd),float(vals.loc[dt,'PORTFOLIO']/vals.loc[peak_date,'PORTFOLIO']-1)))
+   armed=False
+ return events
+
+def jse_scenario_stats(vals,market_price,rf,ppy):
+ events=jse_drawdown_events(vals,market_price,-.10)
+ if not events: return {'Scenario':'JSE −10% Drawdown','Historical Events':0}
+ er=pd.DataFrame(events,columns=['Start','End','JSE Event Return','Portfolio Event Return'])
+ # Conditional CAPM uses all underlying periodic observations contained inside the independent event windows.
+ rp=vals.PORTFOLIO.pct_change(fill_method=None); rm=market_price.pct_change(fill_method=None); idx=pd.Index([])
+ for st,en,_,_ in events: idx=idx.union(rp.index[(rp.index>st)&(rp.index<=en)])
+ beta,alpha,n=_conditional_capm(rp.reindex(idx),rm.reindex(idx),rf,ppy)
+ return {'Scenario':'JSE −10% Drawdown','Historical Events':len(er),'Avg Portfolio Event Return':er['Portfolio Event Return'].mean(),'Median Portfolio Event Return':er['Portfolio Event Return'].median(),'Avg JSE Event Return':er['JSE Event Return'].mean(),'Worst Portfolio Event':er['Portfolio Event Return'].min(),'Best Portfolio Event':er['Portfolio Event Return'].max(),'Positive Portfolio Events':(er['Portfolio Event Return']>0).mean(),'Conditional Beta':beta,'Conditional Alpha (periodic)':alpha,'CAPM Period Obs':n}
+
+def one_period_shock_stats(vals,market_price,factor_change,threshold,rf,ppy,label):
+ rp=vals.PORTFOLIO.pct_change(fill_method=None); rm=market_price.pct_change(fill_method=None)
+ d=pd.concat([rp.rename('P'),rm.rename('M'),factor_change.rename('F')],axis=1).dropna(); e=d[d.F>=threshold]
+ beta,alpha,n=_conditional_capm(e.P,e.M,rf,ppy)
+ return {'Scenario':label,'Historical Events':len(e),'Avg Portfolio Event Return':e.P.mean() if len(e) else np.nan,'Median Portfolio Event Return':e.P.median() if len(e) else np.nan,'Avg JSE Event Return':e.M.mean() if len(e) else np.nan,'Avg Factor Shock':e.F.mean() if len(e) else np.nan,'Worst Portfolio Event':e.P.min() if len(e) else np.nan,'Best Portfolio Event':e.P.max() if len(e) else np.nan,'Positive Portfolio Events':(e.P>0).mean() if len(e) else np.nan,'Conditional Beta':beta,'Conditional Alpha (periodic)':alpha,'CAPM Period Obs':n}
 
 title_col, report_col1, report_col2=st.columns([8,1,1])
 with title_col: st.title('Portfolio Backtester')
@@ -312,35 +334,33 @@ weights_end=vals[ASSETS].div(vals.PORTFOLIO,axis=0); wt=pd.DataFrame({'Ticker':A
 st.divider(); st.subheader('Asset Correlation'); corr=asset_r[ASSETS].dropna().corr(); mask=np.triu(np.ones(corr.shape,dtype=bool),k=1); net_corr=float(corr.where(mask).stack().mean()) if len(corr)>1 else np.nan; st.metric('Net Inter-Asset Correlation','N/A' if not np.isfinite(net_corr) else f'{net_corr:.3f}'); heat=go.Figure(data=go.Heatmap(z=corr.values,x=corr.columns,y=corr.index,zmin=-1,zmax=1,zmid=0,colorscale='RdBu',reversescale=True,text=np.round(corr.values,2),texttemplate='%{text:.2f}')); heat.update_layout(title='Pearson Correlation Matrix'); st.plotly_chart(heat,use_container_width=True)
 st.divider(); st.subheader(f'{mode} — Beta & Alpha Evolution vs {BENCHMARK_TICKER}'); roll_beta,roll_alpha,capm_window=rolling_capm(vals,market_r,RF,ppy); line_chart({f'{capm_window}-period Rolling Beta':roll_beta},f'{mode} — Rolling Beta vs {BENCHMARK_TICKER}','Beta'); line_chart({f'{capm_window}-period Rolling Alpha':roll_alpha*100},f'{mode} — Rolling Annualised CAPM Alpha','Alpha (%)'); cb,ncb=conditional_beta(vals,bp)
 
-st.divider(); st.subheader('Macro Risk & Conditional Performance')
-st.caption('Historical conditional regimes within the configured backtest window — not hypothetical repricing shocks. JSE ≥10% refers to the market being at least 10% below its prior running peak; reported JSE return is the average period return while in that drawdown regime. σ thresholds are estimated from factor changes over the same configured window.')
+st.divider(); st.subheader('Macro Risk & Historical Scenario Analysis')
+st.caption('Historical event analysis: portfolio performance is measured over the same realised market interval as each stress event. Results are event returns, not annualised hypothetical forecasts.')
 sc1,sc2,sc3,sc4=st.columns(4)
-with sc1: use_jse=st.toggle('JSE drawdown regime (≥10% below prior peak)',value=True,key='macro_jse')
-with sc2: use_oil=st.toggle('Oil shock +2σ',value=False,key='macro_oil')
-with sc3: use_vix=st.toggle('VIX shock +2σ',value=False,key='macro_vix')
-with sc4: use_move=st.toggle('MOVE shock +1.5σ',value=False,key='macro_move')
+with sc1: use_jse=st.toggle('JSE −10% Drawdown',value=True,key='macro_jse')
+with sc2: use_oil=st.toggle('Oil +2σ Shock',value=False,key='macro_oil')
+with sc3: use_vix=st.toggle('VIX +2σ Shock',value=False,key='macro_vix')
+with sc4: use_move=st.toggle('MOVE +1.5σ Shock',value=False,key='macro_move')
 scenario_rows=[]; macro_factor_meta=[]
 if use_jse:
- jse_dd=bp/bp.cummax()-1; jse_mask=jse_dd<=-.10
- scenario_rows.append(macro_scenario_stats(vals,bp,None,jse_mask,RF,ppy,'JSE Drawdown Regime (≥10% below prior peak)','Historical observations where JSE level is ≥10% below prior running peak; this is NOT a -10% one-period shock'))
- macro_factor_meta.append({'Scenario':'JSE Drawdown Regime (≥10% below prior peak)','Factor':BENCHMARK_TICKER,'Transformation':'drawdown state versus prior running peak (not one-period return)','Threshold':'drawdown ≤ -10%','Stress Obs':int(jse_mask.sum())})
+ scenario_rows.append(jse_scenario_stats(vals,bp,RF,ppy))
+ macro_factor_meta.append({'Scenario':'JSE −10% Drawdown','Factor':BENCHMARK_TICKER,'Event':'previous peak → first crossing of −10% drawdown','Threshold':'≤ −10%'})
 if use_oil or use_vix or use_move:
  try:
   mf=load_macro_factors(daily_mode).reindex(prices.index).ffill()
-  for name,use,zcut,label in [('Oil',use_oil,2.0,'Oil +2σ'),('VIX',use_vix,2.0,'VIX +2σ'),('MOVE',use_move,1.5,'MOVE +1.5σ')]:
+  for name,use,zcut,label in [('Oil',use_oil,2.0,'Oil +2σ Shock'),('VIX',use_vix,2.0,'VIX +2σ Shock'),('MOVE',use_move,1.5,'MOVE +1.5σ Shock')]:
    if not use: continue
-   chg=mf[name].pct_change(fill_method=None); mu=chg.mean(); sig=chg.std(); threshold=mu+zcut*sig; mask=chg>=threshold
-   scenario_rows.append(macro_scenario_stats(vals,bp,chg,mask,RF,ppy,label,f'{name} percentage change ≥ sample mean + {zcut:g}σ'))
-   macro_factor_meta.append({'Scenario':label,'Factor':name,'Transformation':'period percentage change','Mean':mu,'Std Dev':sig,'Threshold':threshold,'Stress Obs':int(mask.sum())})
+   chg=mf[name].pct_change(fill_method=None); mu=chg.mean(); sig=chg.std(); threshold=mu+zcut*sig
+   scenario_rows.append(one_period_shock_stats(vals,bp,chg,threshold,RF,ppy,label))
+   macro_factor_meta.append({'Scenario':label,'Factor':name,'Event':'single configured observation interval','Transformation':'percentage change','Mean':mu,'Std Dev':sig,'Threshold':threshold})
  except Exception as e:
   st.warning(f'Macro factor data unavailable for selected scenario(s): {e}')
-scenario_df=pd.DataFrame(scenario_rows)
-macro_factor_meta_df=pd.DataFrame(macro_factor_meta)
+scenario_df=pd.DataFrame(scenario_rows); macro_factor_meta_df=pd.DataFrame(macro_factor_meta)
 if not scenario_df.empty:
  display_scen=scenario_df.copy()
- for c0 in ['Portfolio Return','Avg Portfolio Return','Annualised Volatility','Conditional Alpha','Positive Periods','Worst Portfolio Period','Avg JSE Period Return During Regime']:
-  display_scen[c0]=display_scen[c0].map(lambda x:f'{x:.2%}' if pd.notna(x) else 'N/A')
- display_scen['Conditional Beta']=display_scen['Conditional Beta'].map(lambda x:f'{x:.3f}' if pd.notna(x) else 'N/A')
+ for c0 in ['Avg Portfolio Event Return','Median Portfolio Event Return','Avg JSE Event Return','Avg Factor Shock','Worst Portfolio Event','Best Portfolio Event','Positive Portfolio Events','Conditional Alpha (periodic)']:
+  if c0 in display_scen: display_scen[c0]=display_scen[c0].map(lambda x:f'{x:.2%}' if pd.notna(x) else 'N/A')
+ if 'Conditional Beta' in display_scen: display_scen['Conditional Beta']=display_scen['Conditional Beta'].map(lambda x:f'{x:.3f}' if pd.notna(x) else 'N/A')
  st.dataframe(display_scen,hide_index=True,use_container_width=True)
 else: st.info('Select at least one macro risk scenario.')
 
