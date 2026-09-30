@@ -226,7 +226,7 @@ def conditional_beta(v,market_price,threshold=-.10):
 
 @st.cache_data(ttl=3600,show_spinner=False)
 def load_fx_pair(pair_symbol,daily_mode):
- h=yf.Ticker(pair_symbol).history(start=START,auto_adjust=False,actions=False)
+ h=yf.Ticker(pair_symbol).history(period='max',interval='1d',auto_adjust=False,actions=False)
  if h.empty: raise RuntimeError(f'FX source returned no data for {pair_symbol}')
  x=pd.to_numeric(h['Close'],errors='coerce').dropna(); x.index=pd.to_datetime(x.index).tz_localize(None); x=x.sort_index()
  if not daily_mode: x=x.resample('W-FRI').last()
