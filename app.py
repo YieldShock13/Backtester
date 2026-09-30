@@ -8,9 +8,10 @@ st.set_page_config(page_title="Portfolio Backtester", layout="wide")
 START="2012-02-01"
 DEFAULT_RF=0.07
 DEFAULT_INITIAL=1_202_000
-DEFAULT_ALLOC={"ALSI":400_000,"SP500":200_000,"SA_BONDS":200_000,"EUROPE":125_000,"NEWGOLD":45_000,"EXXARO":50_000,"BERKSHIRE":56_000,"MSCI_EM":65_000,"AGG":61_000}
-TICKERS={"ALSI":"^J203.JO","SP500":"^GSPC","EUROPE":"^STOXX","NEWGOLD":"GLD.JO","EXXARO":"EXX.JO","BERKSHIRE":"BRK-B","MSCI_EM":"EEM","AGG":"AGG","USDZAR":"ZAR=X","EURZAR":"EURZAR=X"}
-ALL_ASSETS=list(DEFAULT_ALLOC)
+DEFAULT_TICKERS=["^J203.JO","^GSPC","STXGVI.JO","GLD.JO","EXX.JO","BRK-B","EEM","AGG"]
+DEFAULT_WEIGHTS={"^J203.JO":0.3328,"^GSPC":0.1664,"STXGVI.JO":0.1664,"GLD.JO":0.0374,"EXX.JO":0.0416,"BRK-B":0.0466,"EEM":0.0541,"AGG":0.0507}
+BENCHMARK_TICKER="^J203.JO"
+
 SHORT_WINDOWS={'1W','1M','3M','6M','1Y'}
 
 @st.cache_data(show_spinner=False)
@@ -48,23 +49,18 @@ def load_stxgvi():
  return close,div
 
 @st.cache_data(ttl=3600,show_spinner=False)
-def load_yahoo_components():
- histories={}
- for asset,ticker in TICKERS.items():
-  h=yf.Ticker(ticker).history(start=START,auto_adjust=False,actions=True)
-  if h.empty: raise RuntimeError(f'Yahoo Finance returned no data for {ticker}')
+def load_ticker_components(tickers):
+ prices={}; divs={}; splits={}; metadata={}
+ for ticker in tickers:
+  obj=yf.Ticker(ticker); h=obj.history(start=START,auto_adjust=False,actions=True)
+  if h.empty: raise RuntimeError(f'Yahoo Finance returned no data for exact ticker {ticker}')
   h=h.copy(); h.index=pd.to_datetime(h.index).tz_localize(None); h=h.sort_index()
-  close=pd.to_numeric(h['Close'],errors='coerce'); div=pd.to_numeric(h.get('Dividends',0.0),errors='coerce').fillna(0.0)
-  if asset in ['NEWGOLD','EXXARO']: close=close/100.0; div=div/100.0
-  histories[asset]=(close,div)
- usdzar=histories['USDZAR'][0].ffill(); eurzar=histories['EURZAR'][0].ffill(); prices={}; divcash={}; local={}; fx_used={}
- for asset in ['ALSI','SP500','EUROPE','NEWGOLD','EXXARO','BERKSHIRE','MSCI_EM','AGG']:
-  close,div=histories[asset]; local[asset]=close
-  if asset in ['SP500','BERKSHIRE','MSCI_EM','AGG']: fx=usdzar.reindex(close.index).ffill()
-  elif asset=='EUROPE': fx=eurzar.reindex(close.index).ffill()
-  else: fx=pd.Series(1.0,index=close.index)
-  fx_used[asset]=fx; prices[asset]=(close*fx).rename(asset); divcash[asset]=(div*fx).rename(asset)
- return prices,divcash,local,fx_used
+  close=pd.to_numeric(h['Close'],errors='coerce').dropna(); div=pd.to_numeric(h.get('Dividends',0.0),errors='coerce').fillna(0.0).reindex(close.index,fill_value=0.0); sp=pd.to_numeric(h.get('Stock Splits',0.0),errors='coerce').fillna(0.0).reindex(close.index,fill_value=0.0)
+  if len(close)<2: raise RuntimeError(f'{ticker}: fewer than two valid Close observations')
+  prices[ticker]=close.rename(ticker); divs[ticker]=div.rename(ticker); splits[ticker]=sp.rename(ticker)
+  try: metadata[ticker]=obj.history_metadata or {}
+  except Exception: metadata[ticker]={}
+ return prices,divs,splits,metadata
 
 def build_bond_components(govi,stx_close,stx_divs):
  last_govi=govi.index.max(); anchor=float(govi.iloc[-1]); px_anchor=float(stx_close.asof(last_govi))
@@ -79,26 +75,20 @@ def build_bond_components(govi,stx_close,stx_divs):
   dt=extret.abs().idxmax(); raise RuntimeError(f'SA-bond continuation sanity check failed on {dt.date()}: {extret.loc[dt]:.2%}')
  return price,div,{'last_govi':last_govi,'extension_months':len(post_price),'max_extension_return':float(extret.abs().max()),'stx_anchor_price':px_anchor,'stx_units_per_index':units}
 
-def build_master():
- prices,divs,local,fx=load_yahoo_components(); g=load_govi_history(); stx,stxdiv=load_stxgvi(); bp,bd,val=build_bond_components(g,stx,stxdiv)
- mp=pd.DataFrame({a:s.resample('ME').last() for a,s in prices.items()}); mp['SA_BONDS']=bp.reindex(mp.index).ffill()
- md=pd.DataFrame({a:s.resample('ME').sum() for a,s in divs.items()}).reindex(mp.index,fill_value=0.0); md['SA_BONDS']=bd.reindex(mp.index,fill_value=0.0)
- ml=pd.DataFrame({a:s.resample('ME').last() for a,s in local.items()}); mf=pd.DataFrame({a:s.resample('ME').last() for a,s in fx.items()})
- return mp.loc[START:],md.reindex(mp.index,fill_value=0.0).loc[START:],ml.loc[START:],mf.loc[START:],g,val
+def build_master(selected):
+ yahoo=[x for x in selected if x!='GOVI']; yp,yd,ys,meta=load_ticker_components(tuple(yahoo)) if yahoo else ({},{},{},{})
+ if yahoo:
+  mp=pd.DataFrame({x:v.resample('ME').last() for x,v in yp.items()}); md=pd.DataFrame({x:v.resample('ME').sum() for x,v in yd.items()})
+ else:
+  g0=load_govi_history(); mp=pd.DataFrame(index=g0.index); md=pd.DataFrame(index=g0.index)
+ g=load_govi_history(); val={'last_govi':g.index.max(),'source':'repository GOVI'}
+ if 'GOVI' in selected: mp['GOVI']=g.reindex(mp.index).ffill(); md['GOVI']=0.0
+ return mp.loc[START:],md.reindex(mp.index,fill_value=0.0).loc[START:],g,val,meta,ys
 
 def build_daily(selected):
- prices,divs,local,fx=load_yahoo_components(); g=load_govi_history(); stx,stxdiv=load_stxgvi(); val={'last_govi':g.index.max(),'extension_months':0,'max_extension_return':np.nan}
- frames={}; dframes={}
- for a in selected:
-  if a=='SA_BONDS':
-   anchor=float(g.iloc[-1]); px_anchor=float(stx.asof(g.index.max())); units=anchor/px_anchor
-   frames[a]=(units*stx.loc[stx.index>g.index.max()]).rename(a); dframes[a]=(units*stxdiv.reindex(frames[a].index,fill_value=0.0)).rename(a)
-   val.update({'stx_anchor_price':px_anchor,'stx_units_per_index':units})
-  else:
-   frames[a]=prices[a].rename(a); dframes[a]=divs[a].reindex(prices[a].index,fill_value=0.0).rename(a)
- dp=pd.concat(frames.values(),axis=1); dd=pd.concat(dframes.values(),axis=1).reindex(dp.index,fill_value=0.0)
- dl=pd.DataFrame({a:local[a] for a in selected if a in local}); df=pd.DataFrame({a:fx[a] for a in selected if a in fx})
- return dp,dd,dl,df,g,val
+ if 'GOVI' in selected: raise RuntimeError('GOVI is monthly-only. For daily analysis use an explicit investable Yahoo ticker such as STXGVI.JO.')
+ yp,yd,ys,meta=load_ticker_components(tuple(selected)); dp=pd.concat(yp.values(),axis=1); dd=pd.concat(yd.values(),axis=1).reindex(dp.index,fill_value=0.0); g=load_govi_history(); val={'last_govi':g.index.max(),'source':'repository GOVI'}
+ return dp,dd,g,val,meta,ys
 
 def resolve_dates(index,timeline,custom_start,custom_end,daily=False):
  end=index.max()
@@ -161,16 +151,6 @@ def conditional_beta(v,market_price,threshold=-.10):
  rp=v.PORTFOLIO.pct_change(fill_method=None); rm=market_price.pct_change(fill_method=None); dd=market_price/market_price.cummax()-1; d=pd.concat([rp.rename('P'),rm.rename('M'),dd.rename('DD')],axis=1).dropna(); d=d[d.DD<=threshold]
  return d.P.cov(d.M)/d.M.var() if len(d)>=2 and d.M.var()>0 else np.nan,len(d)
 
-def fx_attribution(local,fx,zar_price,divs,assets):
- rows=[]
- for a in assets:
-  if a not in ['SP500','BERKSHIRE','MSCI_EM','AGG','EUROPE'] or a not in local or a not in fx: continue
-  d=pd.concat([local[a].rename('L'),fx[a].rename('F'),zar_price[a].rename('Z')],axis=1).dropna()
-  if len(d)<2: continue
-  l=d.L.iloc[-1]/d.L.iloc[0]-1; f=d.F.iloc[-1]/d.F.iloc[0]-1; interaction=l*f; cash=divs[a].sum()/d.Z.iloc[0]; total=l+f+interaction+cash
-  rows.append({'Asset':a,'Total ZAR Return':total,'Underlying contribution % of total':l/total if total else np.nan,'FX contribution % of total':f/total if total else np.nan,'FX interaction % of total':interaction/total if total else np.nan,'Cash distribution % of total':cash/total if total else np.nan})
- return pd.DataFrame(rows)
-
 title_col, report_col1, report_col2 = st.columns([8,1,1])
 with title_col: st.title('Portfolio Backtester')
 latex_slot=report_col1.empty()
@@ -186,11 +166,14 @@ if timeline=='Custom':
  x,y=st.columns(2)
  with x: custom_start=st.date_input('Custom start',value=pd.Timestamp(START).date())
  with y: custom_end=st.date_input('Custom end',value=pd.Timestamp.today().date())
-ASSETS=st.multiselect('Assets',ALL_ASSETS,default=ALL_ASSETS)
-if not ASSETS: st.error('Select at least one asset.'); st.stop()
+ticker_text=st.text_input('Exact Yahoo Finance tickers (comma-separated; GOVI is the repository series)',value=','.join(DEFAULT_TICKERS),help='Any Yahoo Finance ticker may be entered using its exact symbol. Example: STXGVI.JO. No automatic FX overlay is applied.')
+ASSETS=list(dict.fromkeys([x.strip().upper() for x in ticker_text.split(',') if x.strip()]))
+if not ASSETS: st.error('Enter at least one exact ticker.'); st.stop()
 st.markdown('**Weights**'); cols=st.columns(3); raww={}
+default_sum=sum(DEFAULT_WEIGHTS.get(x,0.0) for x in ASSETS)
 for i,a0 in enumerate(ASSETS):
- with cols[i%3]: raww[a0]=st.number_input(f'{a0} (%)',0.0,100.0,float(DEFAULT_ALLOC[a0]/DEFAULT_INITIAL*100),.25)/100
+ default=(DEFAULT_WEIGHTS.get(a0,0.0)/default_sum*100) if default_sum>0 else 100/len(ASSETS)
+ with cols[i%3]: raww[a0]=st.number_input(f'{a0} (%)',0.0,100.0,float(default),.25,key=f'w_{a0}')/100
 if sum(raww.values())<=0: st.error('Weights must be positive.'); st.stop()
 weights={a0:w/sum(raww.values()) for a0,w in raww.items()}; ALLOC={a0:INITIAL*w for a0,w in weights.items()}
 if not np.isclose(sum(ALLOC.values()),INITIAL,atol=.01): st.error('Allocation reconciliation failed.'); st.stop()
@@ -200,8 +183,8 @@ daily_mode=timeline in SHORT_WINDOWS or (timeline=='Custom' and custom_days is n
 ppy=252 if daily_mode else 12
 try:
  with st.spinner('Updating, configuring and validating market data…'):
-  if daily_mode: full_p,full_d,full_l,full_fx,govi,bond_validation=build_daily(ASSETS)
-  else: full_p,full_d,full_l,full_fx,govi,bond_validation=build_master()
+  if daily_mode: full_p,full_d,govi,bond_validation,source_meta,split_events=build_daily(ASSETS)
+  else: full_p,full_d,govi,bond_validation,source_meta,split_events=build_master(ASSETS)
   common=full_p[ASSETS].dropna().index; start,end,requested=resolve_dates(common,timeline,custom_start,custom_end,daily_mode); prices=full_p.loc[(full_p.index>=start)&(full_p.index<=end),ASSETS].dropna(); divs=full_d.reindex(prices.index,fill_value=0.0)[ASSETS]
   if len(prices)<2: raise RuntimeError('Selected timeline has fewer than two common observations')
   asset_r=(prices-prices.shift(1)+divs)/prices.shift(1); bad=asset_r.abs().max(); bad=bad[bad>(.35 if daily_mode else 1.0)]
@@ -216,14 +199,14 @@ data_flags=[]
 if start>requested:
  data_flags.append(f'Requested start {requested:%Y-%m-%d} unavailable for the selected common asset set; backtest starts at {start:%Y-%m-%d}.')
 frequency='daily' if daily_mode else 'month-end'
-if 'SA_BONDS' in ASSETS and prices.index[-1] > bond_validation['last_govi']:
- data_flags.append(f'SA_BONDS uses STXGVI continuation after GOVI cutoff {bond_validation["last_govi"]:%d %b %Y}.')
+if 'GOVI' in ASSETS:
+ data_flags.append(f'GOVI is a repository monthly total-return index series through {bond_validation["last_govi"]:%d %b %Y}; it is not a Yahoo ticker.')
 st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} observations | Nominal R{INITIAL:,.0f} | RF {RF:.2%} | Dividends '+('reinvested' if REINVEST else 'retained as cash'))
 if data_flags:
  st.warning('DATA FLAGS — ' + ' | '.join(data_flags))
 
 mode=st.radio('Backtest mode',['Buy & Hold','Annual Rebalanced'],horizontal=True,index=0); vals=bh if mode=='Buy & Hold' else rb
-market_r=asset_r['ALSI'] if 'ALSI' in asset_r else pd.Series(index=asset_r.index,dtype=float); met=stats(vals,market_r,RF,ppy) if 'ALSI' in ASSETS else stats(vals,vals.PORTFOLIO.pct_change(fill_method=None),RF,ppy)
+bench_p,bench_d,_,_=load_ticker_components((BENCHMARK_TICKER,)); bp=bench_p[BENCHMARK_TICKER].reindex(prices.index).ffill(); bd=bench_d[BENCHMARK_TICKER].reindex(prices.index,fill_value=0.0); market_r=(bp-bp.shift(1)+bd)/bp.shift(1); met=stats(vals,market_r,RF,ppy)
 c1,c2,c3,c4=st.columns(4); c1.metric(f'{mode} Value',f"R{met['Ending Value']:,.0f}"); c2.metric(f'{mode} CAGR',f"{met['CAGR']:.2%}"); c3.metric(f'Sharpe ({RF:.2%} RF)',f"{met['Sharpe Ratio']:.3f}"); c4.metric('Max Drawdown',f"{met['Maximum Drawdown']:.2%}")
 st.subheader(f'{mode} Analytics'); st.dataframe(metric_table(met),hide_index=True,use_container_width=True)
 p=vals.PORTFOLIO; r=p.pct_change(fill_method=None).dropna(); growth=p/p.iloc[0]*100; dd=(p/p.cummax()-1)*100; roll_n=252 if daily_mode else 12; sharpe_n=756 if daily_mode else 36; roll_ret=((1+r).rolling(roll_n).apply(np.prod,raw=True)-1)*100; roll_vol=r.rolling(roll_n).std()*np.sqrt(ppy)*100; ex=r-((1+RF)**(1/ppy)-1); roll_sr=ex.rolling(sharpe_n).mean()/ex.rolling(sharpe_n).std()*np.sqrt(ppy)
@@ -232,26 +215,29 @@ st.subheader(f'{mode} Annual Total Returns'); ar=annual_returns(vals); ar['Annua
 st.subheader('Annual Total Return by Asset Class'); aar=annual_asset_returns(prices,divs,ASSETS)
 for c0 in ASSETS: aar[c0]=aar[c0].map(lambda x:f'{x:.2%}' if pd.notna(x) else 'N/A')
 st.dataframe(aar,hide_index=True,use_container_width=True)
+st.subheader('Return Attribution by Ticker — Capital Gain vs Income')
+attr=[]
+for a0 in ASSETS:
+ p0=float(prices[a0].iloc[0]); p1=float(prices[a0].iloc[-1]); cap=(p1-p0)/p0; inc=float(divs[a0].iloc[1:].sum())/p0; total=cap+inc
+ attr.append({'Ticker':a0,'Total Return':total,'Capital Gain':cap,'Income / Distributions':inc,'Capital Gain % of Total':cap/total if not np.isclose(total,0) else np.nan,'Income % of Total':inc/total if not np.isclose(total,0) else np.nan})
+at=pd.DataFrame(attr)
+for c0 in ['Total Return','Capital Gain','Income / Distributions','Capital Gain % of Total','Income % of Total']: at[c0]=at[c0].map(lambda x:f'{x:.2%}' if pd.notna(x) else 'N/A')
+st.dataframe(at,hide_index=True,use_container_width=True)
+st.caption('Holding-period identity: total return = capital gain + explicit cash income/distributions. Attribution percentages are each component as a proportion of that ticker’s total return.')
 weights_end=vals[ASSETS].div(vals.PORTFOLIO,axis=0); wt=pd.DataFrame({'Asset':ASSETS,'Initial Weight':[weights[a0] for a0 in ASSETS],'Ending Weight':weights_end.iloc[-1].values}); wt['Initial Weight']=wt['Initial Weight'].map(lambda x:f'{x:.2%}'); wt['Ending Weight']=wt['Ending Weight'].map(lambda x:f'{x:.2%}'); st.subheader(f'{mode} Portfolio Weights'); st.dataframe(wt,hide_index=True,use_container_width=True)
-st.divider(); st.subheader('Buy & Hold vs Annual Rebalancing'); line_chart({'Buy & Hold':bh.PORTFOLIO,'Annual Rebalanced':rb.PORTFOLIO},'Portfolio Value Comparison','ZAR'); bhm=stats(bh,market_r if 'ALSI' in ASSETS else bh.PORTFOLIO.pct_change(),RF,ppy); rbm=stats(rb,market_r if 'ALSI' in ASSETS else rb.PORTFOLIO.pct_change(),RF,ppy); st.dataframe(pd.DataFrame({'Buy & Hold':metric_table(bhm).set_index('Metric').Value,'Annual Rebalanced':metric_table(rbm).set_index('Metric').Value}),use_container_width=True)
+st.divider(); st.subheader('Buy & Hold vs Annual Rebalancing'); line_chart({'Buy & Hold':bh.PORTFOLIO,'Annual Rebalanced':rb.PORTFOLIO},'Portfolio Value Comparison','ZAR'); bhm=stats(bh,market_r,RF,ppy); rbm=stats(rb,market_r,RF,ppy); st.dataframe(pd.DataFrame({'Buy & Hold':metric_table(bhm).set_index('Metric').Value,'Annual Rebalanced':metric_table(rbm).set_index('Metric').Value}),use_container_width=True)
 st.divider(); st.subheader('Asset Correlation'); corr=asset_r[ASSETS].dropna().corr(); mask=np.triu(np.ones(corr.shape,dtype=bool),k=1); stacked=corr.where(mask).stack(); net_corr=float(stacked.mean()) if len(stacked) else np.nan; st.metric('Net Inter-Asset Correlation','N/A' if not np.isfinite(net_corr) else f'{net_corr:.3f}'); heat=go.Figure(data=go.Heatmap(z=corr.values,x=corr.columns,y=corr.index,zmin=-1,zmax=1,zmid=0,colorscale='RdBu',reversescale=True,text=np.round(corr.values,2),texttemplate='%{text:.2f}')); heat.update_layout(title='Pearson Correlation Matrix'); st.plotly_chart(heat,use_container_width=True)
-if 'ALSI' in ASSETS:
- st.divider(); st.subheader(f'{mode} — Beta & Alpha Evolution vs ALSI'); roll_beta,roll_alpha,capm_window=rolling_capm(vals,market_r,RF,ppy); line_chart({f'{capm_window}-period Rolling Beta':roll_beta},f'{mode} — Rolling Beta vs ALSI','Beta'); line_chart({f'{capm_window}-period Rolling Alpha':roll_alpha*100},f'{mode} — Rolling Annualised CAPM Alpha','Alpha (%)'); cb,ncb=conditional_beta(vals,prices['ALSI']); st.metric('Conditional Beta — ALSI drawdown ≥10%', 'N/A' if not np.isfinite(cb) else f'{cb:.3f}', help=f'Calculated from {ncb} configured observations where ALSI was at least 10% below its running peak.')
-
-st.divider(); st.subheader('Macro Tracker — FX Attribution to Total Return')
-fxa=fx_attribution(full_l.reindex(prices.index),full_fx.reindex(prices.index),prices,divs,ASSETS)
-if len(fxa):
- for c0 in fxa.columns[1:]: fxa[c0]=fxa[c0].map(lambda x:f'{x:.2%}' if pd.notna(x) else 'N/A')
- st.dataframe(fxa,hide_index=True,use_container_width=True); st.caption('Attribution shares reconcile underlying appreciation + FX translation + interaction + cash distributions to each foreign asset’s total ZAR return. FX contribution is shown as a percentage of total return.')
-else: st.caption('No foreign-currency assets selected.')
+st.divider(); st.subheader(f'{mode} — Beta & Alpha Evolution vs {BENCHMARK_TICKER}'); roll_beta,roll_alpha,capm_window=rolling_capm(vals,market_r,RF,ppy); line_chart({f'{capm_window}-period Rolling Beta':roll_beta},f'{mode} — Rolling Beta vs {BENCHMARK_TICKER}','Beta'); line_chart({f'{capm_window}-period Rolling Alpha':roll_alpha*100},f'{mode} — Rolling Annualised CAPM Alpha','Alpha (%)'); cb,ncb=conditional_beta(vals,bp); st.metric(f'Conditional Beta — {BENCHMARK_TICKER} drawdown ≥10%', 'N/A' if not np.isfinite(cb) else f'{cb:.3f}', help=f'Calculated from {ncb} configured observations where {BENCHMARK_TICKER} was at least 10% below its running peak.')
 
 @st.dialog('Full Calculation Workings', width='large')
 def show_latex_report():
  st.caption(f'Configured run: {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} | N={ppy}')
  st.header('Data & total-return construction')
- st.latex(r'P^{ZAR}_{a,t}=P^{local}_{a,t}\\times FX_t')
- st.latex(r'D^{ZAR}_{a,t}=D^{local}_{a,t}\\times FX_t')
- st.latex(r'r_{a,t}=\\frac{P_{a,t}-P_{a,t-1}+D_{a,t}}{P_{a,t-1}}')
+ st.write('Each Yahoo instrument uses the exact user-entered ticker with history(auto_adjust=False, actions=True). Close is the price series; Dividends is explicit cash income; Stock Splits is captured for audit. Adjusted Close is never used. No FX overlay is applied.')
+ st.latex(r'r_{a,t}=\frac{P_{a,t}-P_{a,t-1}+D_{a,t}}{P_{a,t-1}}')
+ st.latex(r'R^{hold}_{a}=\frac{P_{a,T}-P_{a,0}+\sum_{t=1}^{T}D_{a,t}}{P_{a,0}}')
+ st.latex(r'R^{hold}_{a}=R^{capital}_{a}+R^{income}_{a}')
+ st.latex(r'CapitalShare_a=R^{capital}_a/R^{hold}_a,\quad IncomeShare_a=R^{income}_a/R^{hold}_a')
  st.header('Portfolio construction')
  st.latex(r'n_{a,0}=\\frac{w_a V_0}{P_{a,0}}')
  st.latex(r'V^{cash}_{a,t}=n_{a,t}P_{a,t}+C_{a,t},\\quad C_{a,t}=C_{a,t-1}+n_{a,t}D_{a,t}')
@@ -274,10 +260,6 @@ def show_latex_report():
  st.latex(r'R_{1Y,t}=\\prod_{i=t-N+1}^{t}(1+r_i)-1')
  st.latex(r'\\sigma_{1Y,t}=sd(r_{t-N+1:t})\\sqrt{N}')
  st.latex(r'Sharpe_{3Y,t}=\\frac{mean(r-r_f)}{sd(r-r_f)}\\sqrt{N}')
- st.header('FX attribution')
- st.latex(r'1+R_{ZAR}=(1+R_{local})(1+R_{FX})')
- st.latex(r'R_{ZAR}=R_{local}+R_{FX}+R_{local}R_{FX}+R_{cash}')
- st.latex(r'Contribution_i\\%=\\frac{R_i}{R_{ZAR}}')
  st.caption('N is 252 for daily runs and 12 for month-end runs. Annual rebalancing resets sleeves to configured target weights at the first observation of each new calendar year.')
 
 @st.dialog('Full Data Audit', width='large')
@@ -288,11 +270,11 @@ def show_audit_report():
   for flag in data_flags: st.warning(flag)
  else: st.success('No data flags for the configured run.')
  st.header('Sources & transformations')
- st.write('**Market assets and FX** — Yahoo Finance raw Close and actions. Adjusted Close is not used.')
- st.write('**South African government bonds** — repository GOVI monthly history; STXGVI continuation only after the authoritative GOVI cutoff.')
+ st.write('**Yahoo instruments** — exact user-entered Yahoo Finance ticker symbols; history(auto_adjust=False, actions=True). Close, Dividends and Stock Splits are captured. Adjusted Close is not used. No automatic FX overlay is applied.')
+ st.write('**Repository series** — GOVI is the only non-Yahoo selectable series and is monthly-only. STXGVI.JO or any other investable proxy must be selected explicitly by exact Yahoo ticker.')
  st.write(f'**Observation frequency** — {frequency}. 1W, 1M, 3M, 6M, 1Y and custom windows ≤366 days use observed daily data; longer windows use month-end observations.')
- st.write('**Corporate actions** — Yahoo Close is treated as split-normalised; splits are not applied a second time. Cash dividends/distributions are explicit and follow the selected reinvestment setting.')
- st.write(f'**GOVI cutoff** — {bond_validation["last_govi"]:%d %b %Y}. No monthly GOVI observations are interpolated into fake daily prices.')
+ st.write('**Corporate actions** — Yahoo Close from auto_adjust=False is used; Stock Splits are captured for audit and are not applied a second time. Cash dividends/distributions are explicit and follow the selected reinvestment setting.')
+ st.write(f'**GOVI cutoff** — {bond_validation["last_govi"]:%d %b %Y}. GOVI is never interpolated into fake daily observations.')
  st.header('Coverage & validation')
  st.write(f'**Selected assets** — {", ".join(ASSETS)}')
  st.write(f'**Common validated window** — {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y}; {len(prices):,} observations.')
