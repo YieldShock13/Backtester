@@ -12,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -24,18 +26,20 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           s=Path('app.py').read_text()
-          for x in ["ORCA'S","CAPITAL STRATEGIES","orcaFloat","waveDash","auto_adjust=False","Pearson Correlation Matrix","Historical Scenario Analysis","Show LaTeX","Return Attribution by Instrument"]:
+          for x in ["ORCA'S","CAPITAL STRATEGIES","orcaFloat","waveDash","auto_adjust=False","Pearson Correlation Matrix","Historical Scenario Analysis","Show LaTeX","Return Attribution by Instrument","period='max'","Walk-Forward Validator — 52-Week Estimation Window","GARCH(1,1)"]:
               assert x in s,x
           for x in ['.stApp{','[data-testid="stHeader"]{','[data-testid="stToolbar"]{','[data-testid="stMetric"]{','.stButton>button{']:
               assert x not in s,x
           assert s.count('st.set_page_config(')==1
-          print('PASS: header branding retained; global analytics styling removed')
+          assert 'START="2012-02-01"' not in s
+          print('PASS: full-history weekly engine and walk-forward validator validated')
           PY
       - name: Commit validated app
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add app.py
-          git diff --cached --quiet && exit 1
-          git commit -m "Keep Orca branding in header only"
+          git diff --cached --quiet && { echo 'No app.py changes produced'; exit 1; }
+          git commit -m "Add full-history walk-forward validation"
+          git pull --rebase origin main
           git push origin HEAD:main
