@@ -56,32 +56,6 @@ def build_daily_components(histories,selected,last_govi):
     return p,d,notes
 
 
-def common_observed_window(prices,selected,requested_start,requested_end):
-    starts={}; ends={}; flags=[]
-    for a in selected:
-        s=prices[a].dropna()
-        if s.empty: raise ValueError(f"{a}: no daily observations")
-        starts[a]=s.index.min(); ends[a]=s.index.max()
-    start=max(pd.Timestamp(requested_start),max(starts.values()))
-    end=min(pd.Timestamp(requested_end),min(ends.values()))
-    if start>end: raise ValueError("Selected assets have no overlapping observed daily history")
-    # Align to actual common trading observations, never interpolate an asset price.
-    x=prices.loc[(prices.index>=start)&(prices.index<=end),selected].dropna(how="any")
-    if len(x)<2: raise ValueError("Fewer than two common observed daily prices in requested window")
-    actual_start=x.index[0]; actual_end=x.index[-1]
-    for a in selected:
-        if starts[a]>pd.Timestamp(requested_start): flags.append(f"{a}: daily history begins {starts[a]:%Y-%m-%d}")
-        if ends[a]<pd.Timestamp(requested_end): flags.append(f"{a}: daily history ends {ends[a]:%Y-%m-%d}")
-    if actual_start>pd.Timestamp(requested_start): flags.append(f"common first observed trading date is {actual_start:%Y-%m-%d}")
-    if actual_end<pd.Timestamp(requested_end): flags.append(f"common last observed trading date is {actual_end:%Y-%m-%d}")
-    return x,daily_dividends_on_price_index(prices,selected,actual_start,actual_end),actual_start,actual_end,starts,ends,flags
-
-
-def daily_dividends_on_price_index(prices,selected,start,end):
-    # Placeholder is intentionally rejected if called without the source dividend frame.
-    raise RuntimeError("Use align_daily_window(prices, dividends, ...) so dividend cash cannot be silently lost")
-
-
 def align_daily_window(prices,dividends,selected,requested_start,requested_end):
     starts={}; ends={}; flags=[]
     for a in selected:
@@ -90,6 +64,7 @@ def align_daily_window(prices,dividends,selected,requested_start,requested_end):
         starts[a]=s.index.min(); ends[a]=s.index.max()
     start=max(pd.Timestamp(requested_start),max(starts.values())); end=min(pd.Timestamp(requested_end),min(ends.values()))
     if start>end: raise ValueError("Selected assets have no overlapping observed daily history")
+    # Prices must be genuinely observed for every selected sleeve. No price interpolation.
     p=prices.loc[(prices.index>=start)&(prices.index<=end),selected].dropna(how="any")
     if len(p)<2: raise ValueError("Fewer than two common observed daily prices in requested window")
     actual_start=p.index[0]; actual_end=p.index[-1]
