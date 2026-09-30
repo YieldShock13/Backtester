@@ -1,0 +1,39 @@
+name: Deploy Orcas Capital Strategies theme
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/add_orcas_theme.py'
+      - '.github/workflows/add_orcas_theme.yml'
+permissions:
+  contents: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply visual-only theme
+        run: python scripts/add_orcas_theme.py
+      - name: Compile
+        run: python -m py_compile app.py
+      - name: Regression assertions
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('app.py').read_text()
+          for x in ["ORCA'S","CAPITAL STRATEGIES","orcaFloat","waveDash","auto_adjust=False","Pearson Correlation Matrix","Historical Scenario Analysis","Show LaTeX","Return Attribution by Instrument"]:
+              assert x in s,x
+          assert s.count('st.set_page_config(')==1
+          print('PASS: visual shell added; core analytics retained')
+          PY
+      - name: Commit validated app
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git diff --cached --quiet && exit 1
+          git commit -m "Add Orca's Capital Strategies animated theme"
+          git push origin HEAD:main
