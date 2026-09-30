@@ -20,6 +20,17 @@ def load_govi_history():
  if len(s)<100: raise RuntimeError('Validated GOVI history is incomplete')
  return s
 
+def _normalise_stxgvi_close(close):
+ s=close.astype(float).copy().dropna(); ratios=s/s.shift(1)
+ breaks=ratios[(ratios>50)&(ratios<150)].index.tolist()+ratios[(ratios>.005)&(ratios<.02)].index.tolist()
+ for dt in sorted(set(breaks)):
+  i=s.index.get_loc(dt); ratio=s.iloc[i]/s.iloc[i-1]
+  if ratio>50: s.iloc[i:]=s.iloc[i:]/100.0
+  elif ratio<.02: s.iloc[i:]=s.iloc[i:]*100.0
+ if float(s.tail(min(60,len(s))).median())>1000: s=s/100.0
+ if not (20<float(s.iloc[-1])<200): raise RuntimeError(f'STXGVI normalised close implausible: {s.iloc[-1]:.2f} ZAR')
+ return s
+
 @st.cache_data(ttl=3600,show_spinner=False)
 def load_ticker_components(tickers):
  prices={}; divs={}; splits={}
@@ -29,6 +40,14 @@ def load_ticker_components(tickers):
   h=h.copy(); h.index=pd.to_datetime(h.index).tz_localize(None); h=h.sort_index()
   close=pd.to_numeric(h['Close'],errors='coerce').dropna()
   div=pd.to_numeric(h.get('Dividends',0.0),errors='coerce').fillna(0.0).reindex(close.index,fill_value=0.0)
+  if ticker.upper()=='STXGVI.JO':
+   close=_normalise_stxgvi_close(close)
+   div=div.reindex(close.index,fill_value=0.0)/100.0
+   check_date=pd.Timestamp('2023-04-25')
+   if check_date in div.index and not np.isclose(float(div.loc[check_date]),1.9145,rtol=0,atol=.0001): raise RuntimeError(f'STXGVI distribution conversion failed: {div.loc[check_date]} ZAR')
+   for dt,dv in div[div!=0].items():
+    px=close.asof(dt)
+    if np.isfinite(px) and (dv<=0 or dv/px>.20): raise RuntimeError(f'STXGVI distribution sanity check failed on {dt.date()}: dividend_ZAR={dv}, close_ZAR={px}')
   sp=pd.to_numeric(h.get('Stock Splits',0.0),errors='coerce').fillna(0.0).reindex(close.index,fill_value=0.0)
   if len(close)<2: raise RuntimeError(f'{ticker}: fewer than two valid Close observations')
   prices[ticker]=close.rename(ticker); divs[ticker]=div.rename(ticker); splits[ticker]=sp.rename(ticker)
