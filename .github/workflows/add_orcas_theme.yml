@@ -27,12 +27,23 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           s=Path('app.py').read_text()
-          for x in ["ORCA'S","CAPITAL STRATEGIES","auto_adjust=False","Pearson Correlation Matrix","Show LaTeX","period='max'","Walk-Forward Validator — 52-Week Estimation Window","GARCH(1,1)","common_inception=max(first_valid)","excluded_incomplete_weeks","Complete-case weekly alignment"]:
+          required=[
+              "ORCA'S","CAPITAL STRATEGIES","auto_adjust=False","Show LaTeX","period='max'",
+              "Walk-Forward Validator — 52-Week Estimation Window","GARCH(1,1)",
+              "common_inception=max(first_valid)","excluded_incomplete_weeks","Complete-case weekly alignment",
+              "Correlation method", "['Pearson','Spearman']", "corr_method.lower()",
+              "min_value=-500.0", "Net exposure must equal 100%",
+              "Use leverage", "Leverage (x)", "Annual financing cost (%)",
+              "apply_leverage", "financing_cost", "LEVERAGE", "FINANCING_COST",
+              "Not financial advice", "subject to revision"
+          ]
+          for x in required:
               assert x in s,x
           assert 'dropped_asset_weeks' not in s
           assert 'START="2012-02-01"' not in s
           assert s.count('st.set_page_config(')==1
-          print('PASS: corrected weekly alignment app validated')
+          assert "min_value=0.0,max_value=100.0" not in s
+          print('PASS: shorts, leverage, financing, correlation selector and disclaimer validated')
           PY
       - name: Commit validated app
         run: |
@@ -40,6 +51,6 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add app.py
           git diff --cached --quiet && { echo 'No app.py changes produced'; exit 1; }
-          git commit -m "Fix weekly alignment diagnostics in live app"
+          git commit -m "Add shorts leverage financing Spearman and disclaimer"
           git pull --rebase origin main
           git push origin HEAD:main
