@@ -1,0 +1,37 @@
+name: Fix LaTeX report escaping
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/fix_latex_slashes.yml']
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fix report LaTeX escaping
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('app.py'); s=p.read_text()
+          marker="@st.dialog('Full Calculation Workings'"
+          i=s.find(marker)
+          if i<0: raise SystemExit('report marker missing')
+          head,tail=s[:i],s[i:]
+          tail=tail.replace('\\\\\\\\','\\\\')
+          p.write_text(head+tail)
+          PY
+          python -m py_compile app.py
+          grep -q "st.latex(r'P^{ZAR}_{a,t}=P^{local}_{a,t}\\\\times FX_t')" app.py
+      - name: Commit
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add app.py
+          git commit -m "Fix report LaTeX escaping"
+          git push
