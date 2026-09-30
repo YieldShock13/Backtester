@@ -236,9 +236,18 @@ def estimate_fx_hedges(prices,divs,hedged_assets,fx_pairs,daily_mode):
  hedge=pd.DataFrame(0.0,index=prices.index,columns=prices.columns); rows=[]
  asset_total=(prices-prices.shift(1)+divs)/prices.shift(1)
  for asset in hedged_assets:
-  pair=fx_pairs[asset]; fx=load_fx_pair(pair,daily_mode).reindex(prices.index); fr=fx.pct_change(fill_method=None)
+  pair=fx_pairs[asset]
+  fx_raw=load_fx_pair(pair,daily_mode).dropna().sort_index()
+  # Align by portfolio week, not exact timestamp. Each portfolio observation receives
+  # the last genuine FX close from the same W-FRI week only; never carry across weeks.
+  fx_week=fx_raw.copy()
+  fx_week.index=fx_week.index.to_period('W-FRI').end_time.normalize()
+  fx_week=fx_week.groupby(level=0).last()
+  portfolio_week=pd.DatetimeIndex(prices.index).to_period('W-FRI').end_time.normalize()
+  fx=pd.Series(fx_week.reindex(portfolio_week).to_numpy(),index=prices.index,name=pair)
+  fr=fx.pct_change(fill_method=None)
   d=pd.concat([asset_total[asset].rename('asset'),fr.rename('fx')],axis=1).dropna()
-  if len(d)<12: raise RuntimeError(f'{asset}: fewer than 12 aligned observations for FX beta estimation against {pair}')
+  if len(d)<12: raise RuntimeError(f'{asset}: fewer than 12 same-week aligned observations for FX beta estimation against {pair}')
   var=float(d.fx.var()); beta=float(d.asset.cov(d.fx)/var) if var>0 else np.nan
   if not np.isfinite(beta): raise RuntimeError(f'{asset}: FX beta could not be estimated against {pair}')
   alpha=float(d.asset.mean()-beta*d.fx.mean()); fitted=alpha+beta*d.fx; ssr=float(((d.asset-fitted)**2).sum()); sst=float(((d.asset-d.asset.mean())**2).sum()); r2=1-ssr/sst if sst>0 else np.nan
