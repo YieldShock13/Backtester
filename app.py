@@ -15,30 +15,41 @@ def load_govi_history():
  if len(s)<100: raise RuntimeError('Validated GOVI history is incomplete')
  return s
 
+def _normalise_stxgvi_close(close):
+ # Yahoo has changed STXGVI.JO quotation units between ZAR and JSE cents (ZAc).
+ # Detect only ~100x regime breaks; never smooth genuine market moves.
+ s=close.astype(float).copy().dropna()
+ ratios=s/s.shift(1)
+ breaks=ratios[(ratios>50)&(ratios<150)].index.tolist()+ratios[(ratios>.005)&(ratios<.02)].index.tolist()
+ for dt in sorted(set(breaks)):
+  i=s.index.get_loc(dt); ratio=s.iloc[i]/s.iloc[i-1]
+  if ratio>50: s.iloc[i:]=s.iloc[i:]/100.0
+  elif ratio<.02: s.iloc[i:]=s.iloc[i:]*100.0
+ # STXGVI economic price should be tens of ZAR, not thousands of ZAc.
+ med=float(s.tail(min(60,len(s))).median())
+ if med>1000: s=s/100.0
+ if not (20 < float(s.iloc[-1]) < 200): raise RuntimeError(f'STXGVI normalised close implausible: {s.iloc[-1]:.2f} ZAR')
+ return s
+
 @st.cache_data(ttl=3600,show_spinner=False)
 def load_stxgvi():
  h=yf.Ticker('STXGVI.JO').history(start='2023-03-01',auto_adjust=False,actions=True)
  if h.empty: raise RuntimeError('Yahoo returned no STXGVI history')
  h=h.copy(); h.index=pd.to_datetime(h.index).tz_localize(None); h=h.sort_index()
- close=pd.to_numeric(h['Close'],errors='coerce')
- div_raw=pd.to_numeric(h.get('Dividends',0.0),errors='coerce').fillna(0.0)
- splits=pd.to_numeric(h.get('Stock Splits',0.0),errors='coerce').fillna(0.0)
- if close.dropna().empty: raise RuntimeError('STXGVI Close is empty')
- # Yahoo .JO Close is in ZAR here (~R74.58 on 25-Apr-2023), while its action feed
- # reports this ETF's distributions in JSE cents (191.45 = R1.9145). Convert actions
- # to the same ZAR unit as Close before constructing holder wealth.
+ close_raw=pd.to_numeric(h['Close'],errors='coerce'); close=_normalise_stxgvi_close(close_raw)
+ div_raw=pd.to_numeric(h.get('Dividends',0.0),errors='coerce').fillna(0.0); splits=pd.to_numeric(h.get('Stock Splits',0.0),errors='coerce').fillna(0.0)
+ # Yahoo action feed is in JSE cents: 191.45 = R1.9145.
  div=div_raw/100.0
- # Cross-check the first post-splice distribution against Satrix's official declaration:
- # 191.45 cents = R1.9145 per security for quarter ended 31-Mar-2023.
  first_date=pd.Timestamp('2023-04-25')
- if first_date not in div.index or not np.isclose(float(div.loc[first_date]),1.9145,rtol=0,atol=0.0001):
-  got=float(div.loc[first_date]) if first_date in div.index else np.nan
-  raise RuntimeError(f'STXGVI distribution conversion failed: 2023-04-25={got} ZAR, expected 1.9145 ZAR')
+ if first_date not in div.index or not np.isclose(float(div.loc[first_date]),1.9145,rtol=0,atol=.0001):
+  got=float(div.loc[first_date]) if first_date in div.index else np.nan; raise RuntimeError(f'STXGVI distribution conversion failed: 2023-04-25={got} ZAR, expected 1.9145 ZAR')
  for dt,dv in div[div!=0].items():
   p=close.asof(dt)
   if np.isfinite(p) and (dv<=0 or dv/p>.20): raise RuntimeError(f'STXGVI distribution sanity check failed on {dt.date()}: dividend_ZAR={dv}, close_ZAR={p}')
- # Yahoo historical Close is already split-normalised; do not apply split actions again.
- wealth=(close+div.cumsum()).rename('STXGVI_WEALTH').dropna().resample('ME').last()
+ wealth=(close+div.reindex(close.index,fill_value=0).cumsum()).rename('STXGVI_WEALTH').dropna().resample('ME').last()
+ mr=wealth.pct_change(fill_method=None).dropna()
+ if (mr.abs()>.20).any():
+  dt=mr.abs().idxmax(); raise RuntimeError(f'STXGVI monthly return sanity check failed on {dt.date()}: {mr.loc[dt]:.2%}')
  if len(wealth)<24: raise RuntimeError('STXGVI live history unexpectedly short')
  return wealth,div,splits
 
@@ -54,17 +65,16 @@ def load_yahoo():
  z['EUROPE']=adj['EUROPE']*adj['EURZAR']; return z
 
 def build_bond_series(govi,stx):
- # GOVI remains available in the repository through Feb-2026. Use it as the authoritative
- # history through that date; only use STXGVI to extend months after the last GOVI observation.
- last_govi=govi.index.max(); pre=govi.copy()
- post=stx.loc[stx.index>last_govi]
- if post.empty:
-  bond=pre.rename('SA_BONDS'); return bond,{'last_govi':last_govi,'extension_months':0}
- anchor=float(pre.iloc[-1]); prior=stx.loc[stx.index<=last_govi]
+ last_govi=govi.index.max(); pre=govi.copy(); post=stx.loc[stx.index>last_govi]
+ if post.empty: return pre.rename('SA_BONDS'),{'last_govi':last_govi,'extension_months':0,'max_extension_return':np.nan}
+ prior=stx.loc[stx.index<=last_govi]
  if prior.empty: raise RuntimeError('No STXGVI observation available to anchor continuation')
- stx_anchor=float(prior.iloc[-1]); post=anchor*(post/stx_anchor)
+ anchor=float(pre.iloc[-1]); stx_anchor=float(prior.iloc[-1]); post=anchor*(post/stx_anchor)
+ bridge=pd.concat([pd.Series([anchor],index=[last_govi]),post]); extret=bridge.pct_change(fill_method=None).dropna()
+ if (extret.abs()>.20).any():
+  dt=extret.abs().idxmax(); raise RuntimeError(f'SA-bond continuation sanity check failed on {dt.date()}: {extret.loc[dt]:.2%}')
  bond=pd.concat([pre,post]); bond=bond[~bond.index.duplicated(keep='last')].sort_index(); bond.name='SA_BONDS'
- return bond,{'last_govi':last_govi,'extension_months':len(post)}
+ return bond,{'last_govi':last_govi,'extension_months':len(post),'max_extension_return':float(extret.abs().max())}
 
 def build_master():
  z=load_yahoo(); g=load_govi_history(); stx,divs,splits=load_stxgvi(); bond,val=build_bond_series(g,stx); m=z.resample('ME').last(); m['SA_BONDS']=bond.reindex(m.index).ffill(); m=m[list(ALLOC)].loc['2012-02-01':].dropna(); return m,g,stx,divs,splits,val
@@ -109,11 +119,11 @@ def conditional_beta(v,m):
  if len(s)<2:return np.nan,len(s),s
  return (s.P-mrf).cov(s.M-mrf)/(s.M-mrf).var(),len(s),s
 
-st.title('Portfolio Backtester'); st.caption('Live Yahoo Finance | SA bonds: SARB GOVI through Feb-2026, then Satrix GOVI ETF continuation using split-normalised Close + explicit cash distributions | Starting capital R1,202,000 | RF 7%')
+st.title('Portfolio Backtester'); st.caption('Live Yahoo Finance | SA bonds: SARB GOVI through Feb-2026, then Satrix GOVI ETF continuation with Yahoo ZAR/ZAc regime normalisation + explicit cash distributions | Starting capital R1,202,000 | RF 7%')
 try:
  with st.spinner('Updating and validating market data…'): master,govi,stxgvi,stx_divs,stx_splits,bond_validation=build_master(); bh=buy_hold(master); rb=annual_rebalanced(master)
 except Exception as e: st.error(f'Data update/validation failed: {e}'); st.exception(e); st.stop()
-bhm,rbm=metrics(bh,master),metrics(rb,master); st.success(f"Data loaded through {master.index[-1]:%d %b %Y} | GOVI authoritative through {bond_validation['last_govi']:%d %b %Y} | STXGVI extension months: {bond_validation['extension_months']}")
+bhm,rbm=metrics(bh,master),metrics(rb,master); st.success(f"Data loaded through {master.index[-1]:%d %b %Y} | GOVI authoritative through {bond_validation['last_govi']:%d %b %Y} | STXGVI extension months: {bond_validation['extension_months']} | max extension move: {bond_validation['max_extension_return']:.2%}")
 mode=st.radio('Backtest mode',['Buy & Hold','Annual Rebalanced'],horizontal=True,index=0); vals=bh if mode=='Buy & Hold' else rb; met=bhm if mode=='Buy & Hold' else rbm
 c1,c2,c3,c4=st.columns(4); c1.metric(f'{mode} Value',f"R{met['Ending Value']:,.0f}"); c2.metric(f'{mode} CAGR',f"{met['CAGR']:.2%}"); c3.metric('Sharpe (7% RF)',f"{met['Sharpe Ratio (RF 7%)']:.3f}"); c4.metric('Max Drawdown',f"{met['Maximum Drawdown']:.2%}")
 st.subheader(f'{mode} Analytics'); st.dataframe(metric_table(met),hide_index=True,use_container_width=True)
@@ -124,6 +134,6 @@ weights=vals[list(ALLOC)].div(vals.PORTFOLIO,axis=0); wt=pd.DataFrame({'Asset':l
 st.divider(); st.subheader('Buy & Hold vs Annual Rebalancing'); line_chart({'Buy & Hold':bh.PORTFOLIO,'Annual Rebalanced':rb.PORTFOLIO},'Portfolio Value Comparison','ZAR'); st.dataframe(pd.DataFrame({'Buy & Hold':metric_table(bhm).set_index('Metric').Value,'Annual Rebalanced':metric_table(rbm).set_index('Metric').Value}),use_container_width=True)
 with st.expander('Methodology & data'):
  st.write('Buy & Hold permits weights to drift. Annual Rebalanced resets to original target weights at the start of each calendar year. Foreign sleeves are translated into ZAR. SA equity uses FTSE/JSE All Share (^J203.JO).')
- st.write('SA bonds use the repository SARB GOVI series through its latest validated observation (currently February 2026). Only subsequent months are extended with Satrix GOVI ETF (STXGVI). Yahoo .JO Close is in ZAR while STXGVI action distributions are supplied in JSE cents, so distributions are divided by 100 before addition to holder wealth. Distributions are retained as cash, not reinvested. Yahoo historical Close is split-normalised, so split actions are not applied a second time.')
-st.divider(); st.subheader('Asset Correlation'); asset_returns=master[list(ALLOC)].pct_change(fill_method=None).dropna(); corr=asset_returns.corr(); mask=np.triu(np.ones(corr.shape,dtype=bool),k=1); net_corr=float(corr.where(mask).stack().mean()); st.metric('Net Inter-Asset Correlation',f'{net_corr:.3f}'); heat=go.Figure(data=go.Heatmap(z=corr.values,x=corr.columns,y=corr.index,zmin=-1,zmax=1,zmid=0,colorscale='RdBu',reversescale=True,text=np.round(corr.values,2),texttemplate='%{text:.2f}')); heat.update_layout(title='Pearson Correlation Matrix — Monthly ZAR Asset Returns',height=650); st.plotly_chart(heat,use_container_width=True)
-st.divider(); st.subheader(f'{mode} — Beta & Alpha Through Time'); roll_beta,roll_alpha=rolling_capm(vals,master); line_chart({'36M Rolling Beta':roll_beta},'36-Month Rolling Beta vs ALSI','Beta'); line_chart({'36M Rolling Alpha':roll_alpha*100},'36-Month Rolling CAPM Alpha — Annualised','%'); cb,nobs,stress=conditional_beta(vals,master); st.metric('Conditional Beta — ALSI Drawdown ≤ -10%',f'{cb:.3f}' if np.isfinite(cb) else 'N/A'); st.caption(f'Conditional beta uses {nobs} monthly observations where ALSI was at least 10% below its previous peak.')
+ st.write('SA bonds use repository GOVI through February 2026. Later months use STXGVI. Yahoo has supplied STXGVI prices in both ZAR and JSE cents; the loader detects only ~100x quotation-unit regime breaks and converts them to a continuous ZAR price before adding cash distributions. Monthly continuation moves above 20% are rejected rather than allowed into the backtest.')
+st.divider(); st.subheader('Asset Correlation'); asset_returns=master[list(ALLOC)].pct_change(fill_method=None).dropna(); corr=asset_returns.corr(); mask=np.triu(np.ones(corr.shape,dtype=bool),k=1); net_corr=float(corr.where(mask).stack().mean()); st.metric('Net Inter-Asset Correlation',f'{net_corr:.3f}'); heat=go.Figure(data=go.Heatmap(z=corr.values,x=corr.columns,y=corr.index,zmin=-1,zmax=1,zmid=0,colorscale='RdBu',reversescale=True,text=np.round(corr.values,2),texttemplate='%{text:.2f}')); heat.update_layout(title='Pearson Correlation Matrix'); st.plotly_chart(heat,use_container_width=True)
+st.divider(); st.subheader(f'{mode} — Beta & Alpha Evolution vs ALSI'); roll_beta,roll_alpha=rolling_capm(vals,master); line_chart({'36M Rolling Beta':roll_beta},f'{mode} — 36-Month Rolling Beta vs ALSI','Beta'); line_chart({'36M Rolling Alpha':roll_alpha*100},f'{mode} — 36-Month Rolling Annualised CAPM Alpha','Alpha (%)'); cb,nobs,stress=conditional_beta(vals,master); st.metric('Conditional Beta — ALSI Drawdown ≥10%', 'N/A' if not np.isfinite(cb) else f'{cb:.3f}'); st.caption(f'Conditional beta estimated using {nobs} monthly observations where ALSI was at least 10% below its prior peak.')
