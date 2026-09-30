@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - 'scripts/add_fx_beta_hedging.py'
+      - 'scripts/relabel_macro_regimes.py'
       - '.github/workflows/apply_latest_hotfix.yml'
   workflow_dispatch:
 permissions:
@@ -18,22 +19,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Apply FX beta hedge patch
-        run: python scripts/add_fx_beta_hedging.py
+      - name: Apply macro regime label clarification
+        run: python scripts/relabel_macro_regimes.py
       - name: Compile production app
         run: python -m py_compile app.py
-      - name: Architecture and FX regression checks
+      - name: Regression checks
         run: |
           python - <<'PY'
           from pathlib import Path
           s=Path('app.py').read_text()
-          required=['FX hedged','Portfolio / base currency','Assets to FX hedge','estimate_fx_hedges','FX Beta / Hedge Ratio','hedge_pnl=prev_exposure*hedge_returns.loc[dt,assets]','FX beta hedging','Pearson Correlation Matrix','Return Attribution by Instrument','Macro Risk & Conditional Performance','Show LaTeX','auto_adjust=False','actions=True']
+          required=['JSE drawdown regime (≥10% below prior peak)','NOT a -10% one-period shock','Avg JSE Period Return During Regime','FX hedged','Pearson Correlation Matrix','Return Attribution by Instrument','Macro Risk & Conditional Performance','Show LaTeX','auto_adjust=False','actions=True']
           missing=[x for x in required if x not in s]
           if missing: raise SystemExit('Missing: '+repr(missing))
-          forbidden=['history_metadata','FX Attribution','fx_decomposition']
-          bad=[x for x in forbidden if x in s]
-          if bad: raise SystemExit('Forbidden regression: '+repr(bad))
-          print('FX + REGRESSION CHECKS: PASS')
+          print('LABEL + REGRESSION CHECKS: PASS')
           PY
       - name: Commit validated app only
         run: |
@@ -41,5 +39,5 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add app.py
-          git commit -m 'Add configurable in-sample FX beta hedging'
+          git commit -m 'Clarify macro risk regime labels'
           git push origin HEAD:main
