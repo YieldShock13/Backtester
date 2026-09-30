@@ -3,19 +3,54 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
+import requests
 
 st.set_page_config(page_title="Portfolio Backtester", layout="wide")
 START="2012-02-01"; RF=0.07; INITIAL=1_202_000
 ALLOC={"ALSI":400_000,"SP500":200_000,"SA_BONDS":200_000,"EUROPE":125_000,"NEWGOLD":45_000,"EXXARO":50_000,"BERKSHIRE":56_000,"MSCI_EM":65_000,"AGG":61_000}
 TICKERS={"ALSI":"^J203.JO","SP500":"^GSPC","EUROPE":"^STOXX","NEWGOLD":"GLD.JO","EXXARO":"EXX.JO","BERKSHIRE":"BRK-B","MSCI_EM":"EEM","AGG":"AGG","USDZAR":"ZAR=X","EURZAR":"EURZAR=X"}
+SARB_GOVI_API="https://custom.resbank.co.za/SarbWebApi/WebIndicators/Shared/GetTimeseriesObservations/KBP2013M"
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(ttl=3600,show_spinner=False)
 def load_govi():
+    # Repository history is the validated fallback/base. The official SARB API is
+    # then queried for newer KBP2013M observations, so the app no longer depends
+    # on manually replacing the CSV every quarter.
     try:
-        d=pd.read_csv('govi_monthly.csv'); d['Date']=pd.to_datetime(d['Date'])+pd.offsets.MonthEnd(0); s=pd.Series(d['SA_BONDS'].astype(float).values,index=d['Date'],name='SA_BONDS').sort_index()
-        if len(s)<100: raise ValueError('GOVI repository history is incomplete')
-        return s,'SARB KBP2013MM (repository snapshot)'
-    except Exception as e: raise RuntimeError(f'GOVI repository dataset unavailable: {e}')
+        d=pd.read_csv('govi_monthly.csv')
+        d['Date']=pd.to_datetime(d['Date'])+pd.offsets.MonthEnd(0)
+        base=pd.Series(d['SA_BONDS'].astype(float).values,index=d['Date'],name='SA_BONDS').sort_index()
+        if len(base)<100: raise ValueError('GOVI repository history is incomplete')
+    except Exception as e:
+        raise RuntimeError(f'GOVI repository dataset unavailable: {e}')
+
+    source='SARB KBP2013M (repository fallback)'
+    try:
+        headers={'User-Agent':'Mozilla/5.0','Accept':'application/json'}
+        r=requests.get(SARB_GOVI_API,headers=headers,timeout=20)
+        r.raise_for_status()
+        payload=r.json()
+        if not isinstance(payload,list) or not payload:
+            raise ValueError('SARB API returned no observations')
+        live=pd.DataFrame(payload)
+        if not {'Period','Value'}.issubset(live.columns):
+            raise ValueError('Unexpected SARB API schema')
+        live['Date']=pd.to_datetime(live['Period'],errors='coerce')+pd.offsets.MonthEnd(0)
+        live['Value']=pd.to_numeric(live['Value'],errors='coerce')
+        live=live.dropna(subset=['Date','Value']).drop_duplicates('Date',keep='last').sort_values('Date')
+        if live.empty: raise ValueError('SARB API observations could not be parsed')
+        live_s=pd.Series(live['Value'].values,index=live['Date'],name='SA_BONDS')
+        # API values take precedence on overlapping dates and append new months.
+        combined=pd.concat([base[~base.index.isin(live_s.index)],live_s]).sort_index()
+        if combined.index.max()<base.index.max():
+            raise ValueError('SARB API history is older than repository history')
+        base=combined
+        source='SARB KBP2013M (live official API; repository fallback enabled)'
+    except Exception:
+        # A temporary SARB outage must not take the dashboard down. The last
+        # validated repository snapshot remains available and its date is shown.
+        pass
+    return base,source
 
 @st.cache_data(ttl=3600,show_spinner=False)
 def load_yahoo():
@@ -97,14 +132,13 @@ st.subheader(f'{mode} Annual Returns'); ar=annual_returns(vals); ar['Annual Retu
 weights=vals[list(ALLOC)].div(vals['PORTFOLIO'],axis=0); wt=pd.DataFrame({'Asset':list(ALLOC),'Initial Weight':[ALLOC[a]/INITIAL for a in ALLOC],'Ending Weight':weights.iloc[-1].values}); wt['Initial Weight']=wt['Initial Weight'].map(lambda x:f'{x:.2%}'); wt['Ending Weight']=wt['Ending Weight'].map(lambda x:f'{x:.2%}'); st.subheader(f'{mode} Portfolio Weights'); st.dataframe(wt,hide_index=True,use_container_width=True)
 st.divider(); st.subheader('Buy & Hold vs Annual Rebalancing'); line_chart({'Buy & Hold':bh['PORTFOLIO'],'Annual Rebalanced':rb['PORTFOLIO']},'Portfolio Value Comparison','ZAR'); comparison=pd.DataFrame({'Buy & Hold':metric_table(bhm).set_index('Metric')['Value'],'Annual Rebalanced':metric_table(rbm).set_index('Metric')['Value']}); st.dataframe(comparison,use_container_width=True)
 with st.expander('Methodology & data'):
-    st.write('Buy & Hold invests the original allocations once and permits weights to drift. Annual Rebalanced resets to the original target weights at the start of each calendar year. Foreign sleeves are translated into ZAR. The R400k South African equity sleeve uses FTSE/JSE All Share (^J203.JO). The R200k South African bond sleeve uses SARB KBP2013MM GOVI.')
-    st.write('Yahoo data refresh hourly. GOVI is monthly and stored as the official SARB history in the repository; its latest published level is carried forward until the snapshot is updated. No synthetic daily GOVI return is invented. Beta and CAPM alpha use monthly portfolio and ALSI returns with the same 7% annual risk-free rate used elsewhere.')
+    st.write('Buy & Hold invests the original allocations once and permits weights to drift. Annual Rebalanced resets to the original target weights at the start of each calendar year. Foreign sleeves are translated into ZAR. The R400k South African equity sleeve uses FTSE/JSE All Share (^J203.JO). The R200k South African bond sleeve uses SARB KBP2013M GOVI.')
+    st.write('Yahoo data refresh hourly. GOVI is queried directly from the official SARB Web API (KBP2013M) and refreshed hourly; the validated repository CSV is retained only as a fallback if SARB is temporarily unavailable. Because GOVI is a monthly series, its latest published level is carried forward inside a newer partial month until SARB publishes the next observation. Beta and CAPM alpha use monthly portfolio and ALSI returns with the same 7% annual risk-free rate used elsewhere.')
     st.write(f'SARB source loaded: {govi_source}')
 
 st.divider(); st.subheader('Asset Correlation'); asset_returns=master[list(ALLOC)].pct_change(fill_method=None).dropna(); corr=asset_returns.corr(method='pearson'); mask=np.triu(np.ones(corr.shape,dtype=bool),k=1); net_corr=float(corr.where(mask).stack().mean()); st.metric('Net Inter-Asset Correlation',f'{net_corr:.3f}',help='Arithmetic mean of all unique off-diagonal Pearson correlations. Each asset pair is counted once.')
 heat=go.Figure(data=go.Heatmap(z=corr.values,x=corr.columns,y=corr.index,zmin=-1,zmax=1,zmid=0,colorscale='RdBu',reversescale=True,text=np.round(corr.values,2),texttemplate='%{text:.2f}',hovertemplate='%{y} vs %{x}<br>Pearson r = %{z:.3f}<extra></extra>',colorbar=dict(title='Pearson r'))); heat.update_layout(title='Pearson Correlation Matrix — Monthly ZAR Asset Returns',height=650); st.plotly_chart(heat,use_container_width=True); st.caption(f'Calculated from {len(asset_returns):,} common monthly observations from {asset_returns.index[0]:%b %Y} to {asset_returns.index[-1]:%b %Y}.')
 
-# Very-bottom market sensitivity section. Driven by the same Buy & Hold / Rebalanced toggle.
 st.divider(); st.subheader(f'{mode} — ALSI Beta & Alpha Through Time')
 roll_beta,roll_alpha=rolling_capm(vals,master,36); cond_beta,n_stress,stress=conditional_beta(vals,master)
 c1,c2,c3=st.columns(3); c1.metric('Full-Sample Beta vs ALSI',f"{met['Beta vs ALSI']:.3f}"); c2.metric('Annualised CAPM Alpha',f"{met['CAPM Alpha (Annualised)']:.2%}"); c3.metric('Conditional Beta: ALSI DD ≤ -10%',('N/A' if np.isnan(cond_beta) else f'{cond_beta:.3f}'))
