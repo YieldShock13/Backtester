@@ -400,8 +400,8 @@ try:
   full_p,full_d,govi,bond_validation,split_events=build_master(ASSETS)
   asset_weekly=full_p[ASSETS]; first_valid=asset_weekly.apply(lambda c:c.first_valid_index()).dropna(); last_valid=asset_weekly.apply(lambda c:c.last_valid_index()).dropna(); common_inception=max(first_valid); common_endpoint=min(last_valid); comparable=asset_weekly.loc[(asset_weekly.index>=common_inception)&(asset_weekly.index<=common_endpoint)]; raw_week_count=len(comparable); missing_by_asset=comparable.isna().sum().astype(int).to_dict(); common=comparable.dropna(how='any').index; excluded_incomplete_weeks=int(comparable.isna().any(axis=1).sum()); start,end,requested=resolve_dates(common,timeline,custom_start,custom_end,daily_mode); prices=comparable.loc[(comparable.index>=start)&(comparable.index<=end),ASSETS].dropna(how='any'); divs=full_d.reindex(prices.index,fill_value=0.0)[ASSETS]
   if BENCHMARK=='GOVI': raise RuntimeError('Repository GOVI is monthly-only and cannot be used as a weekly benchmark. Select a daily-history market ticker/proxy.')
-  bench_p,bench_d,_=load_ticker_components((BENCHMARK,)); bp_all=bench_p[BENCHMARK].resample('W-FRI').last(); bd_all=bench_d[BENCHMARK].resample('W-FRI').sum(); benchmark_missing_weeks=int(bp_all.reindex(prices.index).isna().sum()); aligned_index=prices.index.intersection(bp_all.dropna().index); prices=prices.reindex(aligned_index).dropna(how='any'); divs=divs.reindex(prices.index,fill_value=0.0); bp=bp_all.reindex(prices.index); bd=bd_all.reindex(prices.index,fill_value=0.0)
-  if len(prices)<2: raise RuntimeError('Selected timeline has fewer than two complete-case weekly observations across assets and benchmark')
+  bench_p,bench_d,_=load_ticker_components((BENCHMARK,)); bp_all=bench_p[BENCHMARK].resample('W-FRI').last(); bd_all=bench_d[BENCHMARK].resample('W-FRI').sum(); benchmark_missing_weeks=int(bp_all.reindex(prices.index).isna().sum()); bp=bp_all.reindex(prices.index); bd=bd_all.reindex(prices.index,fill_value=0.0)
+  if len(prices)<2: raise RuntimeError('Selected timeline has fewer than two synchronized portfolio observations')
   asset_r=(prices-prices.shift(1)+divs)/prices.shift(1); bad=asset_r.abs().max(); bad=bad[bad>(.35 if daily_mode else 1.0)]
   if len(bad): raise RuntimeError('Implausible asset return(s): '+', '.join(f'{k}={v:.1%}' for k,v in bad.items()))
   fx_hedge_returns=pd.DataFrame(0.0,index=prices.index,columns=ASSETS); fx_hedge_report=pd.DataFrame()
@@ -411,14 +411,20 @@ try:
 except Exception as e: st.error(f'Data update/validation failed: {e}'); st.exception(e); st.stop()
 data_flags=[]
 # Weekly alignment exclusions are documented in Data Audit; they are not promoted to DATA FLAGS unless they prevent the backtest.
-if 'benchmark_missing_weeks' in globals() and benchmark_missing_weeks>0: data_flags.append(f'Weekly alignment excluded {benchmark_missing_weeks} additional week(s) with no genuine benchmark observation.')
+if 'benchmark_missing_weeks' in globals() and benchmark_missing_weeks>0: data_flags.append(f'Benchmark data unavailable for {benchmark_missing_weeks} portfolio week(s). These dates are excluded only from benchmark-dependent analytics (beta, alpha, CAPM and benchmark stress); portfolio history, portfolio returns, CAGR, volatility, drawdown and standalone VaR are unchanged.')
 if start>requested: data_flags.append(f'Requested start {requested:%Y-%m-%d} unavailable for the selected common asset set; backtest starts at {start:%Y-%m-%d}.')
 frequency='weekly (Friday-labelled; last available trading close)'; st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} observations | Nominal {PORTFOLIO_CCY} {INITIAL:,.0f} | RF {RF:.2%} | Dividends '+('reinvested' if REINVEST else 'retained as cash')+(' | FX beta hedge active' if FX_HEDGED and HEDGED_ASSETS else ' | FX unhedged'))
 if FX_HEDGED and HEDGED_ASSETS and not fx_hedge_report.empty:
  st.subheader('FX Beta Hedge — In-Sample Estimates'); fxshow=fx_hedge_report.copy(); fxshow['Alpha (periodic)']=fxshow['Alpha (periodic)'].map(lambda x:f'{x:.4%}'); fxshow['FX Beta / Hedge Ratio']=fxshow['FX Beta / Hedge Ratio'].map(lambda x:f'{x:.4f}'); fxshow['R²']=fxshow['R²'].map(lambda x:f'{x:.4f}'); st.dataframe(fxshow,hide_index=True,use_container_width=True)
 if data_flags: st.warning('DATA FLAGS — '+' | '.join(data_flags))
 mode=st.radio('Backtest mode',['Buy & Hold','Annual Rebalanced'],horizontal=True,index=0); vals=bh if mode=='Buy & Hold' else rb
-market_r=(bp-bp.shift(1)+bd)/bp.shift(1); met=stats(vals,market_r,RF,ppy)
+market_r=(bp-bp.shift(1)+bd)/bp.shift(1)
+# Separate benchmark-analysis sample: missing benchmark weeks are excluded ONLY
+# from benchmark-dependent calculations. Portfolio values/returns are untouched.
+portfolio_r_for_benchmark=vals.PORTFOLIO.pct_change(fill_method=None)
+benchmark_analysis=pd.concat([portfolio_r_for_benchmark.rename('Portfolio'),market_r.rename('Benchmark')],axis=1).dropna()
+benchmark_return_aligned=benchmark_analysis['Benchmark']
+met=stats(vals,benchmark_return_aligned,RF,ppy)
 c1,c2,c3,c4=st.columns(4); c1.metric(f'{mode} Value',f"{met['Ending Value']:,.0f}"); c2.metric(f'{mode} CAGR',f"{met['CAGR']:.2%}"); c3.metric(f'Sharpe ({RF:.2%} RF)',f"{met['Sharpe Ratio']:.3f}"); c4.metric('Max Drawdown',f"{met['Maximum Drawdown']:.2%}")
 st.subheader(f'{mode} Analytics'); st.dataframe(metric_table(met),hide_index=True,use_container_width=True)
 p=vals.PORTFOLIO; r=p.pct_change(fill_method=None).dropna(); growth=p/p.iloc[0]*100; dd=(p/p.cummax()-1)*100; roll_n=52; sharpe_n=156; roll_ret=((1+r).rolling(roll_n).apply(np.prod,raw=True)-1)*100; roll_vol=r.rolling(roll_n).std()*np.sqrt(ppy)*100; ex=r-((1+RF)**(1/ppy)-1); roll_sr=ex.rolling(sharpe_n).mean()/ex.rolling(sharpe_n).std()*np.sqrt(ppy)
@@ -652,7 +658,7 @@ def show_audit_report():
    nb=int(wf['CAPM Forecast'].notna().sum()); add('Walk-forward','CAPM estimates available','PASS' if nb==len(wf) else 'WARNING',f'{nb}/{len(wf)} one-step CAPM forecasts available')
  if 'missing_by_asset' in globals():
   miss_txt=', '.join(f'{k}: {v}' for k,v in missing_by_asset.items() if v) or 'none'
-  add('Alignment','Complete-case weekly alignment','PASS' if excluded_incomplete_weeks==0 and benchmark_missing_weeks==0 else 'WARNING',f'Weekly observations use the latest genuine daily date shared by all selected assets within each Friday-labelled week. Comparable weeks={raw_week_count} ({common_inception:%Y-%m-%d} to {common_endpoint:%Y-%m-%d}); unrecoverable asset weeks excluded={excluded_incomplete_weeks}; benchmark-incomplete weeks excluded={benchmark_missing_weeks}; final aligned weeks={len(prices)}. No interpolation or cross-week forward fill.')
+  add('Alignment','Complete-case weekly alignment','PASS' if excluded_incomplete_weeks==0 and benchmark_missing_weeks==0 else 'WARNING',f'Weekly observations use the latest genuine daily date shared by all selected assets within each Friday-labelled week. Comparable weeks={raw_week_count} ({common_inception:%Y-%m-%d} to {common_endpoint:%Y-%m-%d}); unrecoverable asset weeks excluded={excluded_incomplete_weeks}; benchmark-missing portfolio weeks={benchmark_missing_weeks}; portfolio weeks retained={len(prices)}. Benchmark-missing dates are dropped only from benchmark-dependent analytics; portfolio-level history and standalone risk/return calculations are unchanged. No interpolation or cross-week forward fill.')
  if 'STXGVI.JO' in ASSETS: add('Source validation','STXGVI cents/ZAR normalisation','PASS','normalisation and distribution sanity checks completed before portfolio construction')
  if 'GOVI' in ASSETS: add('Source validation','GOVI repository history','PASS' if len(govi)>=100 else 'FAIL',f'{len(govi)} repository observations; last={govi.index.max():%Y-%m-%d}')
  audit=pd.DataFrame(checks); rank={'PASS':0,'WARNING':1,'FAIL':2}; worst=max((rank[x] for x in audit.Status),default=0); overall=['PASS','WARNING','FAIL'][worst]
