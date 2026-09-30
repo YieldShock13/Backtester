@@ -1,9 +1,9 @@
-name: Expand quantitative LaTeX workings
+name: Deploy macro risk scenarios
 on:
   push:
     branches: [main]
     paths:
-      - 'scripts/expand_latex_quant.py'
+      - 'scripts/add_macro_risk_section.py'
       - '.github/workflows/expand_latex_quant.yml'
 permissions:
   contents: write
@@ -15,25 +15,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python scripts/expand_latex_quant.py
-      - run: python -m py_compile app.py
-      - name: Quant coverage and regression assertions
+      - name: Apply macro risk patch
+        run: python scripts/add_macro_risk_section.py
+      - name: Compile
+        run: python -m py_compile app.py
+      - name: Regression and macro assertions
         run: |
           python - <<'PY'
           from pathlib import Path
           s=Path('app.py').read_text()
-          required=['Show LaTeX','Complete Quantitative Workings','Historical VaR','Expected Shortfall','Pearson covariance','Rolling beta','Conditional beta','Return attribution by instrument','Downside deviation','Calmar','CAPM alpha','Annual rebalancing','Adjusted Close is not used']
+          required=['Macro Risk & Conditional Performance','JSE drawdown ≥10%','Oil shock +2σ','VIX shock +2σ','MOVE shock +1.5σ','macro_scenario_stats','load_macro_factors','Macro risk and conditional performance','Show LaTeX','Return Attribution by Instrument']
           for x in required: assert x in s,x
           assert "title='Pearson Correlation Matrix'" in s
-          assert "auto_adjust=False" in s
-          assert "Return Attribution by Instrument" in s
+          assert 'auto_adjust=False' in s
           print('PASS')
           PY
-      - name: Commit validated app only
+      - name: Commit validated app
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add app.py
           git diff --cached --quiet && exit 1
-          git commit -m 'Expand Show LaTeX to complete quantitative workings'
+          git commit -m 'Add macro risk conditional scenario engine'
           git push origin HEAD:main
