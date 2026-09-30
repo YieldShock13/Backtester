@@ -9,10 +9,6 @@ st.set_page_config(page_title="Orca's Capital Strategies | Portfolio Backtester"
 # Orca's Capital Strategies — visual shell only; analytics and methodology remain unchanged.
 st.markdown(r"""
 <style>
-:root{--orca-bg:#06111f;--orca-panel:#0a1929;--orca-line:#16314b;--orca-blue:#43a9ff;--orca-ice:#d9efff;--orca-text:#eaf4ff;--orca-muted:#8fa8bf}
-.stApp{background:linear-gradient(180deg,#06111f 0,#081522 24rem,#f7f9fc 24rem,#f7f9fc 100%)}
-[data-testid="stHeader"]{background:rgba(5,14,25,.82);backdrop-filter:blur(12px)}
-[data-testid="stToolbar"]{color:#d9efff}
 .orca-hero{position:relative;overflow:hidden;height:225px;margin:-1rem -1rem 1.6rem;border-bottom:1px solid #1c3d5b;background:radial-gradient(circle at 18% 65%,rgba(28,132,219,.20),transparent 28%),linear-gradient(110deg,#030a12,#071829 58%,#06111f);box-shadow:0 18px 45px rgba(0,0,0,.22)}
 .orca-brand{position:absolute;left:31%;top:53px;z-index:5;border-left:1px solid rgba(145,198,238,.35);padding-left:34px}
 .orca-name{font-family:Georgia,'Times New Roman',serif;font-size:52px;letter-spacing:.14em;color:#f5f9fc;line-height:1;text-shadow:0 0 28px rgba(108,187,255,.10)}
@@ -26,9 +22,6 @@ st.markdown(r"""
 @keyframes orcaFloat{0%,100%{transform:translateY(0) rotate(-2deg)}50%{transform:translateY(-8px) rotate(1deg)}}
 @keyframes waveDash{to{stroke-dashoffset:-160}}
 @keyframes pulse{0%,100%{opacity:.2;transform:scale(.65)}50%{opacity:1;transform:scale(1.2)}}
-/* retain Streamlit usability below the branded shell */
-[data-testid="stMetric"]{border-radius:10px}
-.stButton>button{border-radius:8px}
 @media(max-width:900px){.orca-hero{height:190px}.orca-mark{left:0;width:250px}.orca-brand{left:35%;top:48px}.orca-name{font-size:31px}.orca-sub{font-size:10px;letter-spacing:.28em}}
 </style>
 <div class="orca-hero">
