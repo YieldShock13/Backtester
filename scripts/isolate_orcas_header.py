@@ -33,15 +33,18 @@ s=s.replace("st.latex(r'\\mathcal S_{JSE}=\\{t:DD^{JSE}_t\\le-10\\%\\}')","st.la
 s=s.replace("st.latex(r'N=252\\ \\text{(daily)}\\quad\\text{or}\\quad N=12\\ \\text{(month-end)}')","st.latex(r'N=52\\ \\text{(weekly)}')")
 p.write_text(s)
 
+# IMPORTANT: run the weekly patch whenever mutual-date synchronization is not yet in
+# the production app. Previous workflow failures happened because the generic weekly
+# markers were already present, so the new patch was skipped and app.py stayed unchanged.
 s=Path('app.py').read_text()
-if "Walk-Forward Validator — 52-Week Estimation Window" not in s or "period='max'" not in s or "Complete-case weekly alignment" not in s or "dropped_asset_weeks" in s:
+if "mutual_daily=daily_px.dropna(how='any')" not in s:
     runpy.run_path('scripts/expand_history_walkforward.py', run_name='__main__')
 
 s=p.read_text()
 assert '.orca-hero{' in s and "ORCA'S" in s
 for forbidden in ['.stApp{','[data-testid="stHeader"]{','[data-testid="stToolbar"]{','[data-testid="stMetric"]{','.stButton>button{']:
     assert forbidden not in s, forbidden
-for required in ["st.segmented_control('Currency'","Complete audit checks","Search benchmark","Oil +3σ Shock","US HY OAS +2σ Widening","benchmark_scenario_stats","Beta vs Benchmark","Benchmark={BENCHMARK}","Pearson Correlation Matrix","Show LaTeX","observation_date","interval='1d'","resample('W-FRI').last()","resample('W-FRI').sum()","ppy=52","roll_n=52; sharpe_n=156","weekly (Friday-labelled; last available trading close)","Benchmark −10% Drawdown ({bench_label} — {BENCHMARK})","\\mathcal S_{B}","period='max'","Walk-Forward Validator — 52-Week Estimation Window","GARCH(1,1)","Complete-case weekly alignment","common_inception=max(first_valid)","excluded_incomplete_weeks","Pre-inception/post-history gaps are not counted"]:
+for required in ["st.segmented_control('Currency'","Complete audit checks","Search benchmark","Oil +3σ Shock","US HY OAS +2σ Widening","benchmark_scenario_stats","Beta vs Benchmark","Benchmark={BENCHMARK}","Pearson Correlation Matrix","Show LaTeX","observation_date","interval='1d'","ppy=52","roll_n=52; sharpe_n=156","Benchmark −10% Drawdown ({bench_label} — {BENCHMARK})","\\mathcal S_{B}","period='max'","Walk-Forward Validator — 52-Week Estimation Window","GARCH(1,1)","Complete-case weekly alignment","common_inception=max(first_valid)","excluded_incomplete_weeks","mutual_daily=daily_px.dropna(how='any')","groupby(mutual_daily.index.to_period('W-FRI')).tail(1)"]:
     assert required in s, required
 assert "auto_adjust=False,actions=True" in s
 assert "['Adj Close']" not in s and '[\"Adj Close\"]' not in s
