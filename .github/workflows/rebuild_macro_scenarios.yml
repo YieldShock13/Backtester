@@ -1,0 +1,42 @@
+name: Rebuild macro historical scenarios
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/rebuild_macro_scenario_analysis.py'
+      - '.github/workflows/rebuild_macro_scenarios.yml'
+permissions:
+  contents: write
+jobs:
+  validate-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply scoped scenario patch
+        run: python scripts/rebuild_macro_scenario_analysis.py
+      - name: Compile
+        run: python -m py_compile app.py
+      - name: Scenario methodology and regression checks
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('app.py').read_text()
+          required=['jse_drawdown_events','previous peak → first crossing of −10% drawdown','Avg Portfolio Event Return','Avg JSE Event Return','Conditional Alpha (periodic)','Oil +2σ Shock','VIX +2σ Shock','MOVE +1.5σ Shock','Pearson Correlation Matrix','Return Attribution by Instrument','Show LaTeX','FX hedged','auto_adjust=False']
+          missing=[x for x in required if x not in s]
+          if missing: raise SystemExit('Missing: '+repr(missing))
+          forbidden=["d=d[d.Stress]","Annualised Volatility':stress","Portfolio Return':(1+stress.P).prod()"]
+          bad=[x for x in forbidden if x in s]
+          if bad: raise SystemExit('Old regime logic remains: '+repr(bad))
+          print('SCENARIO + REGRESSION CHECKS: PASS')
+          PY
+      - name: Commit validated app
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git diff --cached --quiet && exit 1
+          git commit -m 'Rebuild macro risk as historical event scenario analysis'
+          git push origin HEAD:main
