@@ -21,32 +21,25 @@ s=s.replace("custom_days=(pd.Timestamp(custom_end)-pd.Timestamp(custom_start)).d
 s=s.replace("if daily_mode: full_p,full_d,govi,bond_validation,split_events=build_daily(ASSETS)\n  else: full_p,full_d,govi,bond_validation,split_events=build_master(ASSETS)","full_p,full_d,govi,bond_validation,split_events=build_master(ASSETS)")
 s=s.replace("frequency='daily' if daily_mode else 'month-end'","frequency='weekly (Friday-labelled; last available trading close)'")
 s=s.replace("roll_n=252 if daily_mode else 12; sharpe_n=756 if daily_mode else 36","roll_n=52; sharpe_n=156")
-old="bench_p,bench_d,_=load_ticker_components((BENCHMARK,)); bp=bench_p[BENCHMARK].reindex(prices.index).ffill(); bd=bench_d[BENCHMARK].reindex(prices.index,fill_value=0.0)"
-new="bench_p,bench_d,_=load_ticker_components((BENCHMARK,)); bp=bench_p[BENCHMARK].resample('W-FRI').last().reindex(prices.index); bd=bench_d[BENCHMARK].resample('W-FRI').sum().reindex(prices.index,fill_value=0.0)"
-s=s.replace(old,new)
 s=s.replace("if not daily_mode: x=x.resample('ME').last()","if not daily_mode: x=x.resample('W-FRI').last()")
 s=s.replace("if not daily_mode: hx=hx.resample('ME').last()","if not daily_mode: hx=hx.resample('W-FRI').last()")
 s=s.replace("fx=fp[pair].reindex(prices.index).ffill()","fx=fp[pair].resample('W-FRI').last().reindex(prices.index)")
-s=s.replace("with sc1: use_bench=st.toggle(f'{BENCHMARK} −10% Drawdown',value=True,key='macro_benchmark')","with sc1: use_bench=st.toggle(f'Benchmark −10% Drawdown ({bench_label} — {BENCHMARK})',value=True,key='macro_benchmark')")
-s=s.replace("macro_factor_meta.append({'Scenario':f'{BENCHMARK} −10% Drawdown','Factor':BENCHMARK,'Event':'previous peak → first crossing of −10% drawdown','Threshold':'≤ −10%'})","macro_factor_meta.append({'Scenario':f'Benchmark −10% Drawdown ({bench_label} — {BENCHMARK})','Factor':f'{bench_label} — {BENCHMARK}','Event':'previous peak → first crossing of −10% drawdown','Threshold':'≤ −10%'})")
-s=s.replace("st.latex(r'\\mathcal S_{JSE}=\\{t:DD^{JSE}_t\\le-10\\%\\}')","st.latex(r'\\mathcal S_{B}=\\{t:DD^{B}_t\\le-10\\%\\}')\n st.write(f'Here B is the configured benchmark: {bench_label} — {BENCHMARK}.')")
-s=s.replace("st.latex(r'N=252\\ \\text{(daily)}\\quad\\text{or}\\quad N=12\\ \\text{(month-end)}')","st.latex(r'N=52\\ \\text{(weekly)}')")
 p.write_text(s)
 
-# Run patch whenever either mutual-date synchronization OR benchmark-only gap handling
-# is absent. This avoids the previous 'validated but no app.py diff' deployment failure.
+# Force the current architecture patch whenever optional-benchmark support is absent.
 s=Path('app.py').read_text()
-if "mutual_daily=daily_px.dropna(how='any')" not in s or "benchmark_analysis=pd.concat" not in s:
+if "USE_BENCHMARK=st.toggle('Use benchmark'" not in s or "benchmark_overlap_start=max(prices.index.min(),bench_valid.index.min())" not in s:
     runpy.run_path('scripts/expand_history_walkforward.py', run_name='__main__')
 
 s=p.read_text()
 assert '.orca-hero{' in s and "ORCA'S" in s
 for forbidden in ['.stApp{','[data-testid="stHeader"]{','[data-testid="stToolbar"]{','[data-testid="stMetric"]{','.stButton>button{']:
     assert forbidden not in s, forbidden
-for required in ["st.segmented_control('Currency'","Complete audit checks","Search benchmark","Oil +3σ Shock","US HY OAS +2σ Widening","benchmark_scenario_stats","Beta vs Benchmark","Benchmark={BENCHMARK}","Pearson Correlation Matrix","Show LaTeX","observation_date","interval='1d'","ppy=52","roll_n=52; sharpe_n=156","Benchmark −10% Drawdown ({bench_label} — {BENCHMARK})","\\mathcal S_{B}","period='max'","Walk-Forward Validator — 52-Week Estimation Window","GARCH(1,1)","Complete-case weekly alignment","common_inception=max(first_valid)","excluded_incomplete_weeks","mutual_daily=daily_px.dropna(how='any')","groupby(mutual_daily.index.to_period('W-FRI')).tail(1)","benchmark_analysis=pd.concat","excluded only from benchmark-dependent analytics","portfolio history, portfolio returns, CAGR, volatility, drawdown and standalone VaR are unchanged"]:
+for required in ["st.segmented_control('Currency'","Complete audit checks","Benchmark (optional)","USE_BENCHMARK=st.toggle('Use benchmark'","Oil +3σ Shock","US HY OAS +2σ Widening","Beta vs Benchmark","Pearson Correlation Matrix","Show LaTeX","observation_date","interval='1d'","ppy=52","roll_n=52; sharpe_n=156","period='max'","Walk-Forward Validator — 52-Week Estimation Window","GARCH(1,1)","mutual_daily=daily_px.dropna(how='any')","benchmark_overlap_start=max(prices.index.min(),bench_valid.index.min())","Only those benchmark-dependent observations are dropped","Portfolio history begins","walk_forward_validation(vals,market_r if USE_BENCHMARK else None"]:
     assert required in s, required
 assert "auto_adjust=False,actions=True" in s
 assert "['Adj Close']" not in s and '[\"Adj Close\"]' not in s
 assert 'START="2012-02-01"' not in s
 assert 'dropped_asset_weeks' not in s
-assert "aligned_index=prices.index.intersection(bp_all.dropna().index)" not in s
+assert "aligned_index=prices.index.intersection" not in s
+assert "benchmark_missing_weeks=int(bp_all.reindex(prices.index).isna().sum())" not in s
