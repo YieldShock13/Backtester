@@ -3,6 +3,7 @@ on:
   push:
     paths:
       - 'scripts/refactor_ticker_engine.py'
+      - '.github/workflows/refactor_ticker_engine.yml'
 jobs:
   refactor:
     runs-on: ubuntu-latest
@@ -20,11 +21,8 @@ jobs:
           from pathlib import Path
           s=Path('app.py').read_text()
           required=['Exact Yahoo Finance tickers','auto_adjust=False','Return Attribution by Ticker — Capital Gain vs Income','Income % of Total','No automatic FX overlay','STXGVI.JO']
-          missing=[x for x in required if x not in s]
-          if missing: raise SystemExit('Missing required elements')
-          forbidden=['Macro Tracker — FX Attribution','P^{ZAR}_{a,t}']
-          hit=[x for x in forbidden if x in s]
-          if hit: raise SystemExit('Legacy FX elements remain')
+          if any(x not in s for x in required): raise SystemExit('Required refactor element missing')
+          if 'Macro Tracker — FX Attribution' in s or 'P^{ZAR}_{a,t}' in s: raise SystemExit('Legacy FX overlay remains')
           print('VALIDATION PASS')
           PY
       - run: |
