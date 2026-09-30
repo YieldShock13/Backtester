@@ -23,6 +23,10 @@ if "Align by portfolio week, not exact timestamp" not in s: runpy.run_path('scri
 s=Path('app.py').read_text()
 s=s.replace("h=yf.Ticker(pair_symbol).history(start=START,auto_adjust=False,actions=False)","h=yf.Ticker(pair_symbol).history(period='max',interval='1d',auto_adjust=False,actions=False)")
 p.write_text(s)
+# Preserve/validate FX hedge estimation modes added directly to app.py.
+s=p.read_text()
+for required_fx in ["FX hedge estimation","1-Period Walk-Forward","hist=d.loc[d.index<dt]","estimate_fx_hedges(prices,divs,HEDGED_ASSETS,FX_PAIRS,daily_mode,FX_HEDGE_METHOD)"]:
+ assert required_fx in s,required_fx
 # Always apply the final naming pass so an already-deployed diagnostics block is renamed.
 runpy.run_path('scripts/rename_linearity_labels.py',run_name='__main__')
 s=p.read_text()
