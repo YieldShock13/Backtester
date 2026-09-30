@@ -1,0 +1,44 @@
+name: Apply latest scoped hotfix
+on:
+  push:
+    paths:
+      - 'hotfix_latest.py'
+      - '.github/workflows/apply_latest_hotfix.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch-validate-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply scoped patch
+        run: python hotfix_latest.py
+      - name: Compile production app
+        run: python -m py_compile app.py
+      - name: Architecture regression checks
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('app.py').read_text()
+          required=['Search asset','Pearson Correlation Matrix','Net Inter-Asset Correlation','Return Attribution by Ticker — Capital Gain vs Income','Show' if False else 'Full Calculation Workings','Full Data Audit','auto_adjust=False','actions=True']
+          missing=[x for x in required if x not in s]
+          if missing: raise SystemExit('Missing: '+repr(missing))
+          forbidden=['history_metadata','FX Attribution','fx_decomposition',"st.dataframe(corr,use_container_width=True)"]
+          bad=[x for x in forbidden if x in s]
+          if bad: raise SystemExit('Forbidden regression: '+repr(bad))
+          print('REGRESSION CHECKS: PASS')
+          PY
+      - name: Commit validated app only
+        run: |
+          if git diff --quiet -- app.py; then echo 'No app changes'; exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git commit -m 'Restore Pearson matrix and source-aware asset search'
+          git push
