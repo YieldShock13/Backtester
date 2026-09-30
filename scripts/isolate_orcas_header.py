@@ -34,7 +34,6 @@ s=s.replace("st.latex(r'N=252\\ \\text{(daily)}\\quad\\text{or}\\quad N=12\\ \\t
 p.write_text(s)
 
 s=Path('app.py').read_text()
-# Run if the full-history/walk-forward layer is absent OR if the old alignment diagnostic is present.
 if "Walk-Forward Validator — 52-Week Estimation Window" not in s or "period='max'" not in s or "Complete-case weekly alignment" not in s or "dropped_asset_weeks" in s:
     runpy.run_path('scripts/expand_history_walkforward.py', run_name='__main__')
 
@@ -42,8 +41,9 @@ s=p.read_text()
 assert '.orca-hero{' in s and "ORCA'S" in s
 for forbidden in ['.stApp{','[data-testid="stHeader"]{','[data-testid="stToolbar"]{','[data-testid="stMetric"]{','.stButton>button{']:
     assert forbidden not in s, forbidden
-for required in ["st.segmented_control('Currency'","Complete audit checks","Search benchmark","Oil +3σ Shock","US HY OAS +2σ Widening","benchmark_scenario_stats","Beta vs Benchmark","Benchmark={BENCHMARK}","Pearson Correlation Matrix","Show LaTeX","observation_date","interval='1d'","resample('W-FRI').last()","resample('W-FRI').sum()","ppy=52","roll_n=52; sharpe_n=156","weekly (Friday-labelled; last available trading close)","Benchmark −10% Drawdown ({bench_label} — {BENCHMARK})","\\mathcal S_{B}","period='max'","Walk-Forward Validator — 52-Week Estimation Window","GARCH(1,1)","Complete-case weekly alignment","common_inception=max(first_valid.dropna())","excluded_incomplete_weeks","Pre-inception/post-history weeks are not counted"]:
+for required in ["st.segmented_control('Currency'","Complete audit checks","Search benchmark","Oil +3σ Shock","US HY OAS +2σ Widening","benchmark_scenario_stats","Beta vs Benchmark","Benchmark={BENCHMARK}","Pearson Correlation Matrix","Show LaTeX","observation_date","interval='1d'","resample('W-FRI').last()","resample('W-FRI').sum()","ppy=52","roll_n=52; sharpe_n=156","weekly (Friday-labelled; last available trading close)","Benchmark −10% Drawdown ({bench_label} — {BENCHMARK})","\\mathcal S_{B}","period='max'","Walk-Forward Validator — 52-Week Estimation Window","GARCH(1,1)","Complete-case weekly alignment","common_inception=max(first_valid)","excluded_incomplete_weeks","Pre-inception/post-history gaps are not counted"]:
     assert required in s, required
 assert "auto_adjust=False,actions=True" in s
 assert "['Adj Close']" not in s and '[\"Adj Close\"]' not in s
 assert 'START="2012-02-01"' not in s
+assert 'dropped_asset_weeks' not in s
