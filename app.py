@@ -128,43 +128,33 @@ def resolve_instrument_names(symbols):
  return names
 
 def _reconstruct_daily_components(close,div,splits,reinvest):
- # Yahoo Close is already split-adjusted. Stock-split events are retained for audit
- # but must NOT be applied again. Dividends are processed on the full daily path
- # before the reconstructed series is sampled at weekly common dates.
+ # Yahoo Close is already split-adjusted. Keep dividends explicit on the full
+ # daily event stream; portfolio_values decides whether each cash dividend is
+ # reinvested or retained as cash.
  c=close.astype(float)
  d=div.astype(float).reindex(c.index,fill_value=0.0)
  sp=splits.astype(float).reindex(c.index,fill_value=0.0)
  bad=sp[(sp!=0)&((sp<=0)|(~np.isfinite(sp)))]
  if len(bad): raise RuntimeError(f'Invalid stock split on {bad.index[0].date()}: {bad.iloc[0]}')
- if not reinvest:
-  return c.rename(c.name),d.rename(d.name)
- bad_reinvest=(d!=0)&((c<=0)|(~np.isfinite(c)))
- if bad_reinvest.any():
-  dt=bad_reinvest[bad_reinvest].index[0]; raise RuntimeError(f'Invalid reinvestment price on {dt.date()}: {c.loc[dt]}')
- reinvest_factor=(1.0+(d/c).where(d!=0,0.0)).cumprod()
- return (reinvest_factor*c).rename(c.name),pd.Series(0.0,index=c.index,name=d.name)
+ return c.rename(c.name),d.rename(d.name)
 
 def build_master(selected,reinvest):
  yahoo=[x for x in selected if x!='GOVI']; yp,yd,ys=load_ticker_components(tuple(yahoo)) if yahoo else ({},{},{})
  if yahoo:
-  # Choose weekly observation dates only from genuine closes shared by every selected ticker.
   genuine_daily=pd.concat([yp[x].rename(x) for x in yahoo],axis=1)
   mutual_daily=genuine_daily.dropna(how='any')
   common_actual=mutual_daily.groupby(mutual_daily.index.to_period('W-FRI')).tail(1)
   actual_dates=pd.DatetimeIndex(common_actual.index)
   friday_labels=actual_dates.to_period('W-FRI').end_time.normalize()
-  # Reconstruct splits/dividends on every daily row FIRST; sample the reconstructed path SECOND.
-  reconstructed_price={}; reconstructed_div={}
-  for x in yahoo:
-   reconstructed_price[x],reconstructed_div[x]=_reconstruct_daily_components(yp[x],yd[x],ys[x],reinvest)
-  mp=pd.DataFrame({x:reconstructed_price[x].reindex(actual_dates).to_numpy() for x in yahoo},index=friday_labels)
+  # Prices are Yahoo split-adjusted Close. Dividends stay explicit and are
+  # accumulated over each exact (previous common date, current common date] interval.
+  mp=pd.DataFrame({x:yp[x].reindex(actual_dates).to_numpy() for x in yahoo},index=friday_labels)
   mp=mp[~mp.index.duplicated(keep='last')].sort_index()
   md=pd.DataFrame(0.0,index=mp.index,columns=yahoo)
-  if not reinvest:
-   for i in range(1,len(actual_dates)):
-    prev_dt=actual_dates[i-1]; curr_dt=actual_dates[i]; label=friday_labels[i]
-    for x in yahoo:
-     md.loc[label,x]=float(reconstructed_div[x].loc[(reconstructed_div[x].index>prev_dt)&(reconstructed_div[x].index<=curr_dt)].sum())
+  for x in yahoo:
+   daily_div=yd[x].astype(float).reindex(yp[x].index,fill_value=0.0)
+   cum=daily_div.cumsum().reindex(actual_dates).to_numpy(dtype=float)
+   md[x]=np.r_[0.0,np.diff(cum)]
  else:
   g0=load_govi_history(); mp=pd.DataFrame(index=g0.index); md=pd.DataFrame(index=g0.index)
  g=load_govi_history(); val={'last_govi':g.index.max(),'source':'repository GOVI'}
@@ -235,10 +225,16 @@ def annual_returns(v):
  return pd.DataFrame(rows,columns=['Year','Annual Total Return','Period'])
 
 def annual_asset_returns(prices,divs,assets):
+ # Standard total return: compound each synchronized period's price change plus
+ # dividend distribution. This is independent of the portfolio reinvest toggle.
+ tr=(prices-prices.shift(1)+divs)/prices.shift(1)
  rows=[]
  for y in sorted(prices.index.year.unique()):
-  idx=prices.index[prices.index.year==y]; prior=prices.index[prices.index<idx[0]]; start=prior[-1] if len(prior) else idx[0]; end=idx[-1]; row={'Year':y,'Period':'Partial Year' if y in [prices.index[0].year,prices.index[-1].year] else 'Full Year'}
-  for a in assets: row[a]=(prices.loc[end,a]-prices.loc[start,a]+divs.loc[(divs.index>start)&(divs.index<=end),a].sum())/prices.loc[start,a]
+  idx=prices.index[prices.index.year==y]
+  row={'Year':y,'Period':'Partial Year' if y in [prices.index[0].year,prices.index[-1].year] else 'Full Year'}
+  for asset in assets:
+   r=tr.loc[idx,asset].dropna()
+   row[asset]=(1.0+r).prod()-1.0 if len(r) else np.nan
   rows.append(row)
  return pd.DataFrame(rows)
 
@@ -810,7 +806,7 @@ def show_audit_report():
   if a0 in split_events:
    nsplit=int((split_events[a0]!=0).sum())
    add('Corporate actions',a0+' split handling','PASS',f'{nsplit} split event(s) identified; Yahoo Close is already split-adjusted, so split ratios are not applied a second time')
- add('Corporate actions','Processing order','PASS','Daily dividends are reconstructed first; Yahoo split-adjusted Close carries split effects; latest genuine common close is sampled only afterward')
+ add('Corporate actions','Processing order','PASS','Yahoo split-adjusted Close carries split effects; every daily dividend is accumulated into its exact common-date interval before weekly sampling')
  if 'STXGVI.JO' in ASSETS: add('Source validation','STXGVI cents/ZAR normalisation','PASS','normalisation and distribution sanity checks completed before portfolio construction')
  if 'GOVI' in ASSETS: add('Source validation','GOVI repository history','PASS' if len(govi)>=100 else 'FAIL',f'{len(govi)} repository observations; last={govi.index.max():%Y-%m-%d}')
  audit=pd.DataFrame(checks); rank={'PASS':0,'WARNING':1,'FAIL':2}; worst=max((rank[x] for x in audit.Status),default=0); overall=['PASS','WARNING','FAIL'][worst]
