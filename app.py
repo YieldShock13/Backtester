@@ -75,20 +75,14 @@ def load_ticker_components(tickers):
   h=yf.Ticker(ticker).history(period='max',interval='1d',auto_adjust=False,actions=True,keepna=True)
   if h.empty: raise RuntimeError(f'Market-data source returned no data for ticker {ticker}')
   h=h.copy(); h.index=pd.to_datetime(h.index).tz_localize(None); h=h.sort_index()
-  close=pd.to_numeric(h['Close'],errors='coerce').dropna()
-  # Keep action rows on their own dates. Do NOT reindex actions to Close here:
-  # doing so silently deletes valid dividend/split events on rows without a Close.
-  div=pd.to_numeric(h.get('Dividends',pd.Series(0.0,index=h.index)),errors='coerce').fillna(0.0)
+  if 'Adj Close' not in h.columns: raise RuntimeError(f'{ticker}: adjusted price is unavailable from the market-data source')
+  close=pd.to_numeric(h['Adj Close'],errors='coerce').dropna()
+  # Adjusted price is the return series used by the backtest; distributions are
+  # therefore not added separately (which would double count them).
+  div=pd.Series(0.0,index=h.index,dtype=float)
   sp=pd.to_numeric(h.get('Stock Splits',pd.Series(0.0,index=h.index)),errors='coerce').fillna(0.0)
-  if ticker.upper()=='STXGVI.JO':
-   close=_normalise_stxgvi_close(close)
-   div=div/100.0
-   check_date=pd.Timestamp('2023-04-25')
-   if check_date in div.index and not np.isclose(float(div.loc[check_date]),1.9145,rtol=0,atol=.0001): raise RuntimeError(f'STXGVI distribution conversion failed: {div.loc[check_date]} ZAR')
-   for dt,dv in div[div!=0].items():
-    px=close.asof(dt)
-    if np.isfinite(px) and (dv<=0 or dv/px>.20): raise RuntimeError(f'STXGVI distribution sanity check failed on {dt.date()}: dividend_ZAR={dv}, close_ZAR={px}')
-  if len(close)<2: raise RuntimeError(f'{ticker}: fewer than two valid Close observations')
+  if ticker.upper()=='STXGVI.JO': close=_normalise_stxgvi_close(close)
+  if len(close)<2: raise RuntimeError(f'{ticker}: fewer than two valid adjusted-price observations')
   prices[ticker]=close.rename(ticker); divs[ticker]=div.rename(ticker); splits[ticker]=sp.rename(ticker)
  return prices,divs,splits
 
@@ -152,30 +146,25 @@ def _reconstruct_daily_components(close,div,splits,reinvest):
 
 def build_master(selected,reinvest):
  yahoo=[x for x in selected if x!='GOVI']; yp,yd,ys=load_ticker_components(tuple(yahoo)) if yahoo else ({},{},{})
- if yahoo:
-  genuine_daily=pd.concat([yp[x].rename(x) for x in yahoo],axis=1)
-  mutual_daily=genuine_daily.dropna(how='any')
-  common_actual=mutual_daily.groupby(mutual_daily.index.to_period('W-FRI')).tail(1)
-  actual_dates=pd.DatetimeIndex(common_actual.index)
-  friday_labels=actual_dates.to_period('W-FRI').end_time.normalize()
-  reconstructed_price={}; reconstructed_div={}
-  for x in yahoo:
-   reconstructed_price[x],reconstructed_div[x]=_reconstruct_daily_components(yp[x],yd[x],ys[x],reinvest)
-  mp=pd.DataFrame({x:reconstructed_price[x].reindex(actual_dates).to_numpy() for x in yahoo},index=friday_labels)
-  mp=mp[~mp.index.duplicated(keep='last')].sort_index()
-  md=pd.DataFrame(0.0,index=mp.index,columns=yahoo)
-  if not reinvest:
-   for x in yahoo:
-    events=reconstructed_div[x].astype(float)
-    union=events.index.union(actual_dates).sort_values()
-    cum=events.reindex(union,fill_value=0.0).cumsum()
-    vals=cum.reindex(actual_dates).to_numpy(dtype=float)
-    md[x]=np.r_[0.0,np.diff(vals)]
- else:
-  g0=load_govi_history(); mp=pd.DataFrame(index=g0.index); md=pd.DataFrame(index=g0.index)
- g=load_govi_history(); val={'last_govi':g.index.max(),'source':'repository GOVI'}
- if 'GOVI' in selected: raise RuntimeError('Repository GOVI is monthly-only. For the weekly backtest select a Yahoo-traded bond/index proxy with daily history instead.')
- return mp,md.reindex(mp.index,fill_value=0.0),g,val,ys
+ if not yahoo: raise RuntimeError('Select at least one daily-history market instrument')
+ genuine=pd.concat([yp[x].rename(x) for x in yahoo],axis=1).sort_index()
+ first_valid=genuine.apply(lambda c:c.first_valid_index()).dropna(); last_valid=genuine.apply(lambda c:c.last_valid_index()).dropna()
+ common_inception=max(first_valid); common_endpoint=min(last_valid)
+ master_index=genuine.index[(genuine.index>=common_inception)&(genuine.index<=common_endpoint)]
+ raw=genuine.reindex(master_index)
+ missing_before=raw.isna()
+ mp=raw.interpolate(method='time',limit_area='inside')
+ if mp.isna().any().any():
+  bad=mp.isna().sum(); bad=bad[bad>0]
+  raise RuntimeError('Unable to interpolate adjusted-price observations: '+', '.join(f'{k}={int(v)}' for k,v in bad.items()))
+ interpolation_report=pd.DataFrame([
+  {'Series':x,'Type':'Portfolio asset','Interpolated Values':int(missing_before[x].sum()),
+   'Genuine Values':int((~missing_before[x]).sum())} for x in yahoo
+ ])
+ md=pd.DataFrame(0.0,index=mp.index,columns=yahoo)
+ g=load_govi_history(); val={'last_govi':g.index.max(),'source':'repository GOVI','interpolation_report':interpolation_report}
+ if 'GOVI' in selected: raise RuntimeError('Repository GOVI is monthly-only. Select a Yahoo-traded bond/index proxy with daily history instead.')
+ return mp,md,g,val,ys
 
 def build_daily(selected):
  if 'GOVI' in selected: raise RuntimeError('GOVI is monthly-only. For daily analysis select an instrument with daily observations, such as STXGVI.JO.')
@@ -286,7 +275,9 @@ def translate_currency(prices,divs,adjusted_assets,source_ccys,base_ccy,daily_mo
   if source==base_ccy: continue
   fx_raw,symbol=load_fx_pair(source,base_ccy,daily_mode)
   if daily_mode:
-   fx=fx_raw.reindex(prices.index)
+   fx0=fx_raw.reindex(prices.index)
+   missing_before=int(fx0.isna().sum())
+   fx=fx0.interpolate(method='time',limit_area='inside')
   else:
    fx_week=fx_raw.copy(); fx_week.index=fx_week.index.to_period('W-FRI').end_time.normalize(); fx_week=fx_week.groupby(level=0).last()
    portfolio_week=pd.DatetimeIndex(prices.index).to_period('W-FRI').end_time.normalize()
@@ -295,7 +286,7 @@ def translate_currency(prices,divs,adjusted_assets,source_ccys,base_ccy,daily_mo
   if missing: raise RuntimeError(f'{asset}: {missing} portfolio observation(s) have no same-period {source}/{base_ccy} FX rate')
   out_p.loc[:,asset]=prices[asset].astype(float)*fx.astype(float)
   out_d.loc[:,asset]=divs[asset].astype(float)*fx.astype(float)
-  rows.append({'Instrument':asset,'Source Currency':source,'Base Currency':base_ccy,'FX Series Used':symbol,'Observations':int(fx.notna().sum()),'Sample Start':fx.index.min(),'Sample End':fx.index.max()})
+  rows.append({'Instrument':asset,'Source Currency':source,'Base Currency':base_ccy,'FX Series Used':symbol,'Observations':int(fx.notna().sum()),'Interpolated Values':missing_before if daily_mode else 0,'Sample Start':fx.index.min(),'Sample End':fx.index.max()})
  return out_p,out_d,pd.DataFrame(rows)
 
 @st.cache_data(ttl=3600,show_spinner=False)
@@ -384,7 +375,7 @@ def walk_forward_summary(wf,var_method):
  valid=wf.dropna(subset=['Actual Return','CAPM Forecast']); rmse=float(np.sqrt(((valid['Actual Return']-valid['CAPM Forecast'])**2).mean())) if len(valid) else np.nan
  mae=float((valid['Actual Return']-valid['CAPM Forecast']).abs().mean()) if len(valid) else np.nan
  v=wf.dropna(subset=['VaR 95%']); breaches=int(v['VaR Breach'].sum()) if len(v) else 0; rate=breaches/len(v) if len(v) else np.nan
- return pd.DataFrame([{'Estimation Window':'52 weeks','OOS Weeks':len(wf),'CAPM Forecast RMSE':rmse,'CAPM Forecast MAE':mae,'Mean OOS Beta':wf['CAPM Beta'].mean(),'VaR Method':var_method,'VaR Confidence':'95%','VaR Breaches':breaches,'VaR Breach Rate':rate,'Expected Breach Rate':.05}])
+ return pd.DataFrame([{'Estimation Window':'252 days','OOS Weeks':len(wf),'CAPM Forecast RMSE':rmse,'CAPM Forecast MAE':mae,'Mean OOS Beta':wf['CAPM Beta'].mean(),'VaR Method':var_method,'VaR Confidence':'95%','VaR Breaches':breaches,'VaR Breach Rate':rate,'Expected Breach Rate':.05}])
 
 title_col, report_col1, report_col2=st.columns([8,1,1])
 with title_col: st.title('Portfolio Backtester')
@@ -393,7 +384,9 @@ with a: timeline=st.selectbox('Timeline',['1W','1M','3M','6M','1Y','3Y','5Y','10
 with b: PORTFOLIO_CCY=st.segmented_control('Currency',['ZAR','USD','EUR','GBP'],default='ZAR',selection_mode='single') or 'ZAR'
 with c: INITIAL=float(st.number_input(f'Nominal amount ({PORTFOLIO_CCY})',min_value=1.0,value=float(DEFAULT_INITIAL),step=10000.0))
 with d: RF=float(st.number_input('Risk-free rate (%)',min_value=0.0,max_value=100.0,value=7.0,step=.25))/100
-with e: REINVEST=st.toggle('Reinvest dividends/distributions',value=False)
+with e:
+ REINVEST=True
+ st.toggle('Adjusted-return series (distributions embedded)',value=True,disabled=True,help='Adjusted prices already embed distributions; they are not added separately.')
 custom_start=custom_end=None
 if timeline=='Custom':
  x,y=st.columns(2)
@@ -473,19 +466,28 @@ st.markdown('**Leverage & Financing**')
 lev1,lev2=st.columns(2)
 with lev1: LEVERAGE=float(st.number_input('Portfolio leverage (x)',min_value=1.0,max_value=10.0,value=1.0,step=.1,help='1.0x = no additional leverage. Applied to portfolio periodic returns after configured long/short weights.'))
 with lev2: LEVERAGE_COST=float(st.number_input('Annual leverage / financing cost (%)',min_value=0.0,max_value=100.0,value=0.0,step=.25,help='Annual financing rate charged on additional borrowed capital (leverage − 1).'))/100
-custom_days=(pd.Timestamp(custom_end)-pd.Timestamp(custom_start)).days if timeline=='Custom' and custom_start and custom_end else None; daily_mode=False; ppy=52
+custom_days=(pd.Timestamp(custom_end)-pd.Timestamp(custom_start)).days if timeline=='Custom' and custom_start and custom_end else None; daily_mode=True; ppy=252
 try:
  with st.spinner('Updating, configuring and validating market data…'):
   full_p,full_d,govi,bond_validation,split_events=build_master(ASSETS,REINVEST)
-  asset_weekly=full_p[ASSETS]; first_valid=asset_weekly.apply(lambda c:c.first_valid_index()).dropna(); last_valid=asset_weekly.apply(lambda c:c.last_valid_index()).dropna(); common_inception=max(first_valid); common_endpoint=min(last_valid); comparable=asset_weekly.loc[(asset_weekly.index>=common_inception)&(asset_weekly.index<=common_endpoint)]; raw_week_count=len(comparable); missing_by_asset=comparable.isna().sum().astype(int).to_dict(); common=comparable.dropna(how='any').index; excluded_incomplete_weeks=int(comparable.isna().any(axis=1).sum()); start,end,requested=resolve_dates(common,timeline,custom_start,custom_end,daily_mode); prices=comparable.loc[(comparable.index>=start)&(comparable.index<=end),ASSETS].dropna(how='any'); divs=full_d.reindex(prices.index,fill_value=0.0)[ASSETS]
+  interpolation_report=bond_validation.get('interpolation_report',pd.DataFrame()).copy()
+  common_inception=full_p.index.min(); common_endpoint=full_p.index.max(); raw_week_count=len(full_p)
+  missing_by_asset={a:int(interpolation_report.loc[interpolation_report.Series==a,'Interpolated Values'].sum()) if not interpolation_report.empty else 0 for a in ASSETS}
+  excluded_incomplete_weeks=0
+  start,end,requested=resolve_dates(full_p.index,timeline,custom_start,custom_end,daily_mode)
+  prices=full_p.loc[(full_p.index>=start)&(full_p.index<=end),ASSETS].copy(); divs=pd.DataFrame(0.0,index=prices.index,columns=ASSETS)
   benchmark_missing_weeks=0; benchmark_overlap_start=None; benchmark_overlap_end=None
   if USE_BENCHMARK:
-   if BENCHMARK=='GOVI': raise RuntimeError('Repository GOVI is monthly-only and cannot be used as a weekly benchmark. Select a daily-history market ticker/proxy.')
-   bench_p,bench_d,_=load_ticker_components((BENCHMARK,)); bp_all=bench_p[BENCHMARK].resample('W-FRI').last(); bd_all=bench_d[BENCHMARK].resample('W-FRI').sum()
-   bench_valid=bp_all.dropna(); benchmark_overlap_start=max(prices.index.min(),bench_valid.index.min()); benchmark_overlap_end=min(prices.index.max(),bench_valid.index.max())
+   if BENCHMARK=='GOVI': raise RuntimeError('Repository GOVI is monthly-only and cannot be used as a daily benchmark. Select a daily-history market ticker/proxy.')
+   bench_p,bench_d,_=load_ticker_components((BENCHMARK,)); bp_raw=bench_p[BENCHMARK].sort_index()
+   bench_valid=bp_raw.dropna(); benchmark_overlap_start=max(prices.index.min(),bench_valid.index.min()); benchmark_overlap_end=min(prices.index.max(),bench_valid.index.max())
    benchmark_portfolio_index=prices.index[(prices.index>=benchmark_overlap_start)&(prices.index<=benchmark_overlap_end)]
-   benchmark_missing_weeks=int(bp_all.reindex(benchmark_portfolio_index).isna().sum())
-   bp=bp_all.reindex(prices.index); bd=bd_all.reindex(prices.index,fill_value=0.0)
+   bp_on_master=bp_raw.reindex(benchmark_portfolio_index)
+   benchmark_missing_weeks=int(bp_on_master.isna().sum())
+   bp_interp=bp_on_master.interpolate(method='time',limit_area='inside')
+   bp=pd.Series(np.nan,index=prices.index,dtype=float,name=BENCHMARK); bp.loc[benchmark_portfolio_index]=bp_interp
+   bd=pd.Series(0.0,index=prices.index,dtype=float)
+   interpolation_report=pd.concat([interpolation_report,pd.DataFrame([{'Series':BENCHMARK,'Type':'Benchmark','Interpolated Values':benchmark_missing_weeks,'Genuine Values':int(bp_on_master.notna().sum())}])],ignore_index=True)
   else:
    bp=pd.Series(np.nan,index=prices.index,dtype=float); bd=pd.Series(0.0,index=prices.index,dtype=float)
   if len(prices)<2: raise RuntimeError('Selected timeline has fewer than two synchronized portfolio observations')
@@ -505,10 +507,10 @@ try:
 except Exception as e: st.error(f'Data update/validation failed: {e}'); st.exception(e); st.stop()
 data_flags=[]
 # Weekly alignment exclusions are documented in Data Audit; they are not promoted to DATA FLAGS unless they prevent the backtest.
-if USE_BENCHMARK and benchmark_missing_weeks>0: data_flags.append(f'Benchmark has {benchmark_missing_weeks} missing week(s) inside its overlap with the portfolio ({benchmark_overlap_start:%Y-%m-%d} to {benchmark_overlap_end:%Y-%m-%d}). Only those benchmark-dependent observations are dropped; portfolio history and portfolio-level analytics are unchanged.')
+if USE_BENCHMARK and benchmark_missing_weeks>0: data_flags.append(f'Benchmark had {benchmark_missing_weeks} missing daily level(s) inside its overlap with the portfolio; these levels were time-interpolated and recorded in Data Audit.')
 if USE_BENCHMARK and benchmark_overlap_start>prices.index.min(): st.caption(f'Portfolio history begins {prices.index.min():%Y-%m-%d}. Benchmark-dependent analytics begin at the nearest available benchmark overlap date, {benchmark_overlap_start:%Y-%m-%d}; earlier portfolio observations remain in all portfolio-level calculations.')
 if start>requested: data_flags.append(f'Requested start {requested:%Y-%m-%d} unavailable for the selected common asset set; backtest starts at {start:%Y-%m-%d}.')
-frequency='weekly (Friday-labelled; last available trading close)'; st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} observations | Nominal {PORTFOLIO_CCY} {INITIAL:,.0f} | RF {RF:.2%} | Dividends '+('reinvested' if REINVEST else 'retained as cash')+(f' | FX translated to {BASE_CCY}: {len(FX_ADJUSTED_ASSETS)} asset(s)' if FX_ADJUST and FX_ADJUSTED_ASSETS else ' | FX translation off')+f' | Leverage {LEVERAGE:.1f}x | Financing cost {LEVERAGE_COST:.2%} p.a.')
+frequency='daily (adjusted-price observations; missing aligned levels interpolated)'; st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} | Nominal {PORTFOLIO_CCY} {INITIAL:,.0f} | RF {RF:.2%} | Adjusted returns (distributions embedded)'+(f' | FX translated to {BASE_CCY}: {len(FX_ADJUSTED_ASSETS)} asset(s)' if FX_ADJUST and FX_ADJUSTED_ASSETS else ' | FX translation off')+f' | Leverage {LEVERAGE:.1f}x | Financing cost {LEVERAGE_COST:.2%} p.a.')
 if FX_ADJUST and FX_ADJUSTED_ASSETS and not fx_translation_report.empty:
  st.subheader('Currency Translation'); st.dataframe(fx_translation_report,hide_index=True,use_container_width=True)
 if USE_BENCHMARK and BENCHMARK_FX_ADJUST and not benchmark_fx_report.empty:
@@ -522,7 +524,7 @@ if mode=='Rebalanced':
 else:
  rebalance_frequency=None; vals=bh.copy(); mode_label='Buy & Hold'
 # Additional leverage is applied to the configured long/short portfolio return. Financing
-# cost is charged only on borrowed capital (L-1), converted to an effective weekly rate.
+# cost is charged only on borrowed capital (L-1), converted to an effective daily rate.
 base_portfolio=vals.PORTFOLIO.copy(); base_r=base_portfolio.pct_change(fill_method=None)
 weekly_financing=(1+LEVERAGE_COST)**(1/ppy)-1
 levered_r=LEVERAGE*base_r-(LEVERAGE-1.0)*weekly_financing
@@ -535,7 +537,7 @@ benchmark_return_aligned=benchmark_analysis['Benchmark'] if USE_BENCHMARK else p
 met=stats(vals,benchmark_return_aligned,RF,ppy)
 c1,c2,c3,c4=st.columns(4); c1.metric(f'{mode_label} Value',f"{met['Ending Value']:,.0f}"); c2.metric(f'{mode_label} CAGR',f"{met['CAGR']:.2%}"); c3.metric(f'Sharpe ({RF:.2%} RF)',f"{met['Sharpe Ratio']:.3f}"); c4.metric('Max Drawdown',f"{met['Maximum Drawdown']:.2%}")
 st.subheader(f'{mode_label} Analytics'); st.dataframe(metric_table(met),hide_index=True,use_container_width=True)
-p=vals.PORTFOLIO; r=p.pct_change(fill_method=None).dropna(); growth=p/p.iloc[0]*100; dd=(p/p.cummax()-1)*100; roll_n=52; sharpe_n=156; roll_ret=((1+r).rolling(roll_n).apply(np.prod,raw=True)-1)*100; roll_vol=r.rolling(roll_n).std()*np.sqrt(ppy)*100; ex=r-((1+RF)**(1/ppy)-1); roll_sr=ex.rolling(sharpe_n).mean()/ex.rolling(sharpe_n).std()*np.sqrt(ppy)
+p=vals.PORTFOLIO; r=p.pct_change(fill_method=None).dropna(); growth=p/p.iloc[0]*100; dd=(p/p.cummax()-1)*100; roll_n=252; sharpe_n=756; roll_ret=((1+r).rolling(roll_n).apply(np.prod,raw=True)-1)*100; roll_vol=r.rolling(roll_n).std()*np.sqrt(ppy)*100; ex=r-((1+RF)**(1/ppy)-1); roll_sr=ex.rolling(sharpe_n).mean()/ex.rolling(sharpe_n).std()*np.sqrt(ppy)
 line_chart({mode_label:p},f'{mode_label} — Portfolio Value','Value'); line_chart({mode_label:growth},f'{mode_label} — Growth of 100','Value'); line_chart({'Drawdown':dd},f'{mode_label} — Portfolio Drawdown','%'); line_chart({'Rolling 1Y Total Return':roll_ret},f'{mode_label} — Rolling 1-Year Total Return','%'); line_chart({'Rolling 1Y Volatility':roll_vol},f'{mode_label} — Rolling 1-Year Annualised Volatility','%'); line_chart({'Rolling 3Y Sharpe':roll_sr},f'{mode_label} — Rolling 3-Year Sharpe Ratio','Sharpe'); line_chart({c0:vals[c0] for c0 in ASSETS},f'{mode_label} — Portfolio Sleeve Values','Value')
 st.subheader(f'{mode_label} Annual Total Returns'); ar=annual_returns(vals); ar['Annual Total Return']=ar['Annual Total Return'].map(lambda x:f'{x:.2%}'); st.dataframe(ar,hide_index=True,use_container_width=True)
 st.subheader('Annual Total Return by Ticker'); aar=annual_asset_returns(prices,divs,ASSETS)
@@ -611,7 +613,7 @@ if use_bench:
  macro_factor_meta.append({'Scenario':f'Benchmark −10% Drawdown ({bench_label} — {BENCHMARK})','Factor':f'{bench_label} — {BENCHMARK}','Event':'previous peak → first crossing of −10% drawdown','Threshold':'≤ −10%'})
 if use_oil or use_vix or use_move or use_hyoas:
  try:
-  mf=load_macro_factors(daily_mode).reindex(prices.index).ffill()
+  mf=load_macro_factors(daily_mode).reindex(prices.index).interpolate(method='time',limit_area='inside')
   for name,use,zcut,label,transform in [('Oil',use_oil,3.0,'Oil +3σ Shock','pct'),('VIX',use_vix,2.0,'VIX +2σ Shock','pct'),('MOVE',use_move,1.5,'MOVE +1.5σ Shock','pct'),('HY OAS',use_hyoas,2.0,'US HY OAS +2σ Widening','diff')]:
    if not use: continue
    chg=mf[name].diff() if transform=='diff' else mf[name].pct_change(fill_method=None)
@@ -629,13 +631,13 @@ if not scenario_df.empty:
  st.dataframe(display_scen,hide_index=True,use_container_width=True)
 else: st.info('Select at least one macro risk scenario.')
 
-st.divider(); st.subheader('Walk-Forward Validator — 52-Week Estimation Window')
-st.caption('Strict one-step-ahead validation: each CAPM and VaR estimate uses only the preceding 52 weekly observations; the following week is held out for validation.')
+st.divider(); st.subheader('Walk-Forward Validator — 252-Day Estimation Window')
+st.caption('Strict one-step-ahead validation: each CAPM and VaR estimate uses only the preceding 252 daily observations; the following day is held out for validation.')
 wf_method=st.segmented_control('VaR model',['Historical','Parametric','GARCH(1,1)'],default='Historical',selection_mode='single',key='wf_var_method') or 'Historical'
-wf=walk_forward_validation(vals,market_r if USE_BENCHMARK else None,RF,ppy,52,wf_method,.95)
+wf=walk_forward_validation(vals,market_r if USE_BENCHMARK else None,RF,ppy,252,wf_method,.95)
 wf_summary=walk_forward_summary(wf,wf_method)
 if wf.empty:
- st.warning('Walk-forward validation requires at least 53 weekly portfolio observations.')
+ st.warning('Walk-forward validation requires at least 253 daily portfolio observations.')
 else:
  show_sum=wf_summary.copy()
  for c0 in ['CAPM Forecast RMSE','CAPM Forecast MAE','VaR Breach Rate','Expected Breach Rate']:
@@ -762,7 +764,7 @@ def show_latex_report():
  st.latex(r'VaR^{hist}_{.95,t}=Q_{.05}(r_{p,t-52:t-1})')
  st.latex(r'VaR^{param}_{.95,t}=\\hat\\mu_t+z_{.05}\\hat\\sigma_t,\\qquad z_{.05}=-1.64485')
  st.latex(r'\\sigma_t^2=\\omega+\\alpha\\epsilon_{t-1}^2+\\beta\\sigma_{t-1}^2,\\qquad VaR^{GARCH}_{.95,t}=\\hat\\mu_t+z_{.05}\\hat\\sigma_t')
- st.write('Every estimate is fit only on the preceding 52 weekly observations and evaluated on the next held-out week. Historical VaR is empirical; Parametric VaR assumes normal weekly returns; GARCH uses a GARCH(1,1) conditional variance with normal innovations. The displayed breach rate is compared with the nominal 5% rate.')
+ st.write('Every estimate is fit only on the preceding 252 daily observations and evaluated on the next held-out week. Historical VaR is empirical; Parametric VaR assumes normal weekly returns; GARCH uses a GARCH(1,1) conditional variance with normal innovations. The displayed breach rate is compared with the nominal 5% rate.')
  st.header('24. Long/short weights and leverage')
  st.latex(r'\sum_i w_i=1,\qquad G=\sum_i|w_i|,\qquad w_i<0\;\Rightarrow\;\text{short position}')
  st.latex(r'r^{(L)}_{p,t}=Lr_{p,t}-(L-1)c_w,\qquad c_w=(1+c_a)^{1/52}-1')
@@ -779,7 +781,10 @@ def show_audit_report():
  add('Structure','Duplicate dates','PASS' if not prices.index.duplicated().any() else 'FAIL',f'{int(prices.index.duplicated().sum())} duplicate date(s)')
  miss=prices.isna().sum(); add('Structure','Missing prices','PASS' if int(miss.sum())==0 else 'FAIL',f'{int(miss.sum())} missing configured price observations')
  dmiss=divs.isna().sum(); add('Structure','Missing distribution fields','PASS' if int(dmiss.sum())==0 else 'WARNING',f'{int(dmiss.sum())} missing distribution observations')
- add('Structure','Common sample size','PASS' if len(prices)>=12 else 'WARNING',f'{len(prices)} aligned observations across {len(ASSETS)} assets')
+ add('Structure','Common sample size','PASS' if len(prices)>=12 else 'WARNING',f'{len(prices)} aligned daily observations across {len(ASSETS)} assets')
+ if 'interpolation_report' in globals() and not interpolation_report.empty:
+  total_interp=int(interpolation_report['Interpolated Values'].sum())
+  add('Interpolation','Interpolated levels','PASS' if total_interp==0 else 'WARNING',f'{total_interp} total level observation(s) interpolated across portfolio assets and benchmark. Interpolation is performed on levels between genuine endpoints; it does not change the full-series net/terminal return between those endpoints, although daily path-dependent statistics can be affected.')
  coverage=[]
  for a0 in ASSETS:
   raw=full_p[a0].dropna() if a0 in full_p else pd.Series(dtype=float)
@@ -811,18 +816,18 @@ def show_audit_report():
   for _,r0 in scenario_df.iterrows():
    n=int(r0.get('Historical Events',0)); add('Macro scenarios',str(r0.get('Scenario','Scenario'))+' event count','PASS' if n>=10 else ('WARNING' if n>=3 else 'FAIL'),f'{n} independent historical event(s)')
  if 'wf' in globals():
-  add('Walk-forward','52-week OOS sample','PASS' if len(wf)>=52 else ('WARNING' if len(wf)>0 else 'FAIL'),f'{len(wf)} held-out weekly validation observations')
+  add('Walk-forward','52-week OOS sample','PASS' if len(wf)>=52 else ('WARNING' if len(wf)>0 else 'FAIL'),f'{len(wf)} held-out daily validation observations')
   if not wf.empty:
    nv=int(wf['VaR 95%'].notna().sum()); add('Walk-forward','VaR estimates available','PASS' if nv==len(wf) else 'WARNING',f'{nv}/{len(wf)} one-step VaR estimates available using {wf_method}')
    nb=int(wf['CAPM Forecast'].notna().sum()); add('Walk-forward','CAPM estimates available','PASS' if nb==len(wf) else 'WARNING',f'{nb}/{len(wf)} one-step CAPM forecasts available')
  if 'missing_by_asset' in globals():
   miss_txt=', '.join(f'{k}: {v}' for k,v in missing_by_asset.items() if v) or 'none'
-  add('Alignment','Complete-case weekly alignment','PASS' if excluded_incomplete_weeks==0 and benchmark_missing_weeks==0 else 'WARNING',f'Weekly observations use the latest genuine daily date shared by all selected assets within each Friday-labelled week. Comparable weeks={raw_week_count} ({common_inception:%Y-%m-%d} to {common_endpoint:%Y-%m-%d}); unrecoverable asset weeks excluded={excluded_incomplete_weeks}; benchmark-missing portfolio weeks={benchmark_missing_weeks}; portfolio weeks retained={len(prices)}. Benchmark-missing dates are dropped only from benchmark-dependent analytics; portfolio-level history and standalone risk/return calculations are unchanged. No interpolation or cross-week forward fill.')
+  add('Alignment','Daily alignment','PASS',f'Daily adjusted-price observations are aligned on the portfolio master calendar. Missing internal asset/benchmark levels are time-interpolated between genuine observations and retained in the audit. Portfolio observations retained={len(prices)}; benchmark interpolations={benchmark_missing_weeks}.')
  for a0 in ASSETS:
   if a0 in split_events:
    nsplit=int((split_events[a0]!=0).sum())
    add('Corporate actions',a0+' split handling','PASS',f'{nsplit} split event(s) identified; Yahoo Close is already split-adjusted, so split ratios are not applied a second time')
- add('Corporate actions','Processing order','PASS','Full repaired daily action stream is preserved. Non-reinvested dividends are accumulated into exact common-date intervals; reinvested dividends buy units on the event date before weekly sampling')
+ add('Corporate actions','Adjusted-return treatment','PASS','Daily Adjusted Close is used as the return series. Cash distributions are embedded in adjusted prices and are not added separately, preventing double counting.')
  if 'STXGVI.JO' in ASSETS: add('Source validation','STXGVI cents/ZAR normalisation','PASS','normalisation and distribution sanity checks completed before portfolio construction')
  if 'GOVI' in ASSETS: add('Source validation','GOVI repository history','PASS' if len(govi)>=100 else 'FAIL',f'{len(govi)} repository observations; last={govi.index.max():%Y-%m-%d}')
  audit=pd.DataFrame(checks); rank={'PASS':0,'WARNING':1,'FAIL':2}; worst=max((rank[x] for x in audit.Status),default=0); overall=['PASS','WARNING','FAIL'][worst]
@@ -833,11 +838,15 @@ def show_audit_report():
  st.subheader('Flags requiring attention'); flagged=audit[audit.Status!='PASS']; st.dataframe(flagged if not flagged.empty else pd.DataFrame([{'Status':'PASS','Evidence':'No audit flags in configured run.'}]),hide_index=True,use_container_width=True)
  st.subheader('Complete audit checks'); st.dataframe(audit,hide_index=True,use_container_width=True)
  st.subheader('Instrument coverage'); st.dataframe(coverage_df,hide_index=True,use_container_width=True)
+ if 'interpolation_report' in globals() and not interpolation_report.empty:
+  st.subheader('Interpolation audit')
+  st.dataframe(interpolation_report,hide_index=True,use_container_width=True)
+  st.caption('Interpolation is applied to missing price/level observations between genuine surrounding observations. It does not alter the full-series net/terminal return between genuine endpoints; it may affect daily path-dependent statistics such as volatility, correlation, beta and VaR.')
  st.subheader('Configured weights'); st.dataframe(pd.DataFrame({'Instrument':[instrument_names.get(x,x) for x in ASSETS],'Ticker':ASSETS,'Weight':[weights[x] for x in ASSETS]}),hide_index=True,use_container_width=True)
  if not fx_translation_report.empty: st.subheader('FX translation audit'); st.dataframe(fx_translation_report,hide_index=True,use_container_width=True)
  if USE_BENCHMARK and BENCHMARK_FX_ADJUST and not benchmark_fx_report.empty: st.subheader('Benchmark FX translation audit'); st.dataframe(benchmark_fx_report,hide_index=True,use_container_width=True)
  if not scenario_df.empty: st.subheader('Scenario sample audit'); st.dataframe(scenario_df,hide_index=True,use_container_width=True)
- st.subheader('Methodology note'); st.write('Audit checks are run on the configured output and its underlying aligned data. Raw daily Close, dividends and stock-split events are reconstructed before weekly common-date sampling; Adjusted Close is not used. PASS indicates no issue detected by the stated check, WARNING identifies a limitation or small sample requiring attention, and FAIL identifies a breached validation rule. The audit is diagnostic rather than a guarantee of source correctness.')
+ st.subheader('Methodology note'); st.write('Audit checks are run on the configured output and its underlying aligned data. Daily Adjusted Close is used for asset and benchmark returns. Missing internal aligned levels are time-interpolated between genuine observations and explicitly counted above. Distributions are embedded in adjusted prices and are not added separately. PASS indicates no issue detected by the stated check, WARNING identifies a limitation or small sample requiring attention, and FAIL identifies a breached validation rule. The audit is diagnostic rather than a guarantee of source correctness.')
 
 if latex_slot.button('Show LaTeX',use_container_width=True): show_latex_report()
 if audit_slot.button('Data Audit',use_container_width=True): show_audit_report()
