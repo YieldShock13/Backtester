@@ -128,24 +128,22 @@ def resolve_instrument_names(symbols):
  return names
 
 def _reconstruct_daily_components(close,div,splits,reinvest):
- # Process every corporate action on the complete DAILY raw event stream before weekly sampling.
- claim_units=1.0; economic_price=pd.Series(index=close.index,dtype=float); economic_div=pd.Series(0.0,index=close.index,dtype=float)
- daily_div=div.astype(float).reindex(close.index,fill_value=0.0)
- daily_splits=splits.astype(float).reindex(close.index,fill_value=0.0)
- for dt in close.index:
-  ratio=float(daily_splits.loc[dt])
-  if ratio:
-   if ratio<=0 or not np.isfinite(ratio): raise RuntimeError(f'Invalid stock split on {dt.date()}: {ratio}')
-   claim_units*=ratio
-  distribution=claim_units*float(daily_div.loc[dt])
-  if reinvest and distribution:
-   px=float(close.loc[dt])
-   if px<=0 or not np.isfinite(px): raise RuntimeError(f'Invalid reinvestment price on {dt.date()}: {px}')
-   claim_units+=distribution/px
-   distribution=0.0
-  economic_price.loc[dt]=claim_units*float(close.loc[dt])
-  economic_div.loc[dt]=distribution
- return economic_price,economic_div
+ # Vectorised daily corporate-action reconstruction before weekly sampling.
+ c=close.astype(float)
+ d=div.astype(float).reindex(c.index,fill_value=0.0)
+ sp=splits.astype(float).reindex(c.index,fill_value=0.0)
+ bad=sp[(sp!=0)&((sp<=0)|(~np.isfinite(sp)))]
+ if len(bad): raise RuntimeError(f'Invalid stock split on {bad.index[0].date()}: {bad.iloc[0]}')
+ split_factor=sp.where(sp!=0,1.0).cumprod()
+ if not reinvest:
+  units=split_factor
+  return (units*c).rename(c.name),(units*d).rename(d.name)
+ bad_reinvest=(d!=0)&((c<=0)|(~np.isfinite(c)))
+ if bad_reinvest.any():
+  dt=bad_reinvest[bad_reinvest].index[0]; raise RuntimeError(f'Invalid reinvestment price on {dt.date()}: {c.loc[dt]}')
+ reinvest_factor=(1.0+(d/c).where(d!=0,0.0)).cumprod()
+ units=split_factor*reinvest_factor
+ return (units*c).rename(c.name),pd.Series(0.0,index=c.index,name=d.name)
 
 def build_master(selected,reinvest):
  yahoo=[x for x in selected if x!='GOVI']; yp,yd,ys=load_ticker_components(tuple(yahoo)) if yahoo else ({},{},{})
