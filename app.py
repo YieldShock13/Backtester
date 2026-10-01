@@ -478,6 +478,7 @@ try:
  with st.spinner('Updating, configuring and validating market data…'):
   full_p,full_d,govi,bond_validation,split_events=build_master(ASSETS,REINVEST)
   asset_weekly=full_p[ASSETS]; first_valid=asset_weekly.apply(lambda c:c.first_valid_index()).dropna(); last_valid=asset_weekly.apply(lambda c:c.last_valid_index()).dropna(); common_inception=max(first_valid); common_endpoint=min(last_valid); comparable=asset_weekly.loc[(asset_weekly.index>=common_inception)&(asset_weekly.index<=common_endpoint)]; raw_week_count=len(comparable); missing_by_asset=comparable.isna().sum().astype(int).to_dict(); common=comparable.dropna(how='any').index; excluded_incomplete_weeks=int(comparable.isna().any(axis=1).sum()); start,end,requested=resolve_dates(common,timeline,custom_start,custom_end,daily_mode); prices=comparable.loc[(comparable.index>=start)&(comparable.index<=end),ASSETS].dropna(how='any'); divs=full_d.reindex(prices.index,fill_value=0.0)[ASSETS]
+  st.info(f'Backtest observation window: {prices.index.min():%Y-%m-%d} to {prices.index.max():%Y-%m-%d} | {len(prices):,} synchronized weekly observations')
   benchmark_missing_weeks=0; benchmark_overlap_start=None; benchmark_overlap_end=None
   if USE_BENCHMARK:
    if BENCHMARK=='GOVI': raise RuntimeError('Repository GOVI is monthly-only and cannot be used as a weekly benchmark. Select a daily-history market ticker/proxy.')
