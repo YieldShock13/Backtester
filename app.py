@@ -231,13 +231,17 @@ def line_chart(series_map,title,ytitle):
 
 def stats(v,market_r,rf,ppy):
  p=v.PORTFOLIO; r=p.pct_change(fill_method=None).dropna(); yrs=max((p.index[-1]-p.index[0]).days/365.25,1/365.25); cagr=(p.iloc[-1]/p.iloc[0])**(1/yrs)-1; vol=r.std()*np.sqrt(ppy); rfp=(1+rf)**(1/ppy)-1; ex=r-rfp; down=ex[ex<0]; dvol=np.sqrt(np.mean(down**2))*np.sqrt(ppy); dd=p/p.cummax()-1
- d=pd.concat([r.rename('P'),market_r.rename('M')],axis=1).dropna(); x=d.M-rfp; y=d.P-rfp; beta=y.cov(x)/x.var() if x.var()>0 else np.nan; alpha=(1+y.mean()-beta*x.mean())**ppy-1 if np.isfinite(beta) else np.nan; var=r.quantile(.05)
- return {'Initial Value':p.iloc[0],'Ending Value':p.iloc[-1],'Total Return':p.iloc[-1]/p.iloc[0]-1,'CAGR':cagr,'Annualised Volatility':vol,'Sharpe Ratio':ex.mean()/ex.std()*np.sqrt(ppy) if ex.std()>0 else np.nan,'Downside Volatility':dvol,'Sortino Ratio':ex.mean()*ppy/dvol if dvol>0 else np.nan,'Beta vs Benchmark':beta,'CAPM Alpha (Annualised)':alpha,'Maximum Drawdown':dd.min(),'Calmar Ratio':cagr/abs(dd.min()) if dd.min()<0 else np.nan,'Period VaR 95%':var,'Period CVaR 95%':r[r<=var].mean(),'Best Period':r.max(),'Worst Period':r.min(),'Positive Periods':(r>0).mean(),'Max DD Date':dd.idxmin()}
+ d=pd.concat([r.rename('P'),market_r.rename('M')],axis=1).dropna(); x=d.M-rfp; y=d.P-rfp; beta=y.cov(x)/x.var() if x.var()>0 else np.nan; alpha=(1+y.mean()-beta*x.mean())**ppy-1 if np.isfinite(beta) else np.nan
+ # Parametric 95% annual VaR from daily returns: annualise mean by 252 and
+ # volatility by sqrt(252), then take the 5% normal quantile.
+ mu_ann=float(r.mean())*ppy; sigma_ann=float(r.std(ddof=1))*np.sqrt(ppy); z05=-1.6448536269514722
+ annual_var=mu_ann+z05*sigma_ann
+ return {'Backtest Range':f'{p.index[0]:%Y-%m-%d} to {p.index[-1]:%Y-%m-%d}','Initial Value':p.iloc[0],'Ending Value':p.iloc[-1],'Total Return':p.iloc[-1]/p.iloc[0]-1,'CAGR':cagr,'Annualised Volatility':vol,'Sharpe Ratio':ex.mean()/ex.std()*np.sqrt(ppy) if ex.std()>0 else np.nan,'Downside Volatility':dvol,'Sortino Ratio':ex.mean()*ppy/dvol if dvol>0 else np.nan,'Beta vs Benchmark':beta,'CAPM Alpha (Annualised)':alpha,'Maximum Drawdown':dd.min(),'Calmar Ratio':cagr/abs(dd.min()) if dd.min()<0 else np.nan,'Annual Parametric VaR 95%':annual_var,'Best Daily Return':r.max(),'Worst Daily Return':r.min(),'Positive Trading Days':(r>0).mean(),'Max DD Date':dd.idxmin()}
 
 def metric_table(m):
- pct={'Total Return','CAGR','Annualised Volatility','Downside Volatility','CAPM Alpha (Annualised)','Maximum Drawdown','Period VaR 95%','Period CVaR 95%','Best Period','Worst Period','Positive Periods'}; rows=[]
+ pct={'Total Return','CAGR','Annualised Volatility','Downside Volatility','CAPM Alpha (Annualised)','Maximum Drawdown','Annual Parametric VaR 95%','Best Daily Return','Worst Daily Return','Positive Trading Days'}; rows=[]
  for k,v in m.items():
-  x=pd.Timestamp(v).strftime('%Y-%m-%d') if k=='Max DD Date' else f'R{v:,.0f}' if k in ['Initial Value','Ending Value'] else f'{v:.2%}' if k in pct else f'{v:.3f}'; rows.append((k,x))
+  x=v if k=='Backtest Range' else pd.Timestamp(v).strftime('%Y-%m-%d') if k=='Max DD Date' else f'R{v:,.0f}' if k in ['Initial Value','Ending Value'] else f'{v:.2%}' if k in pct else f'{v:.3f}'; rows.append((k,x))
  return pd.DataFrame(rows,columns=['Metric','Value'])
 
 def annual_returns(v):
