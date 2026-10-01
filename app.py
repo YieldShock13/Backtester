@@ -225,46 +225,40 @@ def conditional_beta(v,market_price,threshold=-.10):
 
 
 @st.cache_data(ttl=3600,show_spinner=False)
-def load_fx_pair(pair_symbol,daily_mode):
- h=yf.Ticker(pair_symbol).history(period='max',interval='1d',auto_adjust=False,actions=False)
- if h.empty: raise RuntimeError(f'FX source returned no data for {pair_symbol}')
- x=pd.to_numeric(h['Close'],errors='coerce').dropna(); x.index=pd.to_datetime(x.index).tz_localize(None); x=x.sort_index()
- if not daily_mode: x=x.resample('W-FRI').last()
- return x.rename(pair_symbol)
+def load_fx_pair(source_ccy,base_ccy,daily_mode):
+ if source_ccy==base_ccy: return None,None
+ direct=f'{source_ccy}{base_ccy}=X'
+ inverse=f'{base_ccy}{source_ccy}=X'
+ for symbol,invert in [(direct,False),(inverse,True)]:
+  try:
+   h=yf.Ticker(symbol).history(period='max',interval='1d',auto_adjust=False,actions=False)
+   if h.empty: continue
+   x=pd.to_numeric(h['Close'],errors='coerce').dropna(); x.index=pd.to_datetime(x.index).tz_localize(None); x=x.sort_index()
+   if invert: x=1.0/x
+   if not daily_mode: x=x.resample('W-FRI').last()
+   return x.rename(f'{source_ccy}/{base_ccy}'),symbol
+  except Exception:
+   continue
+ raise RuntimeError(f'FX source returned no usable data for {source_ccy}/{base_ccy}')
 
-def estimate_fx_hedges(prices,divs,hedged_assets,fx_pairs,daily_mode,method='In-Sample'):
- hedge=pd.DataFrame(0.0,index=prices.index,columns=prices.columns); rows=[]
- asset_total=(prices-prices.shift(1)+divs)/prices.shift(1)
- for asset in hedged_assets:
-  pair=fx_pairs[asset]
-  fx_raw=load_fx_pair(pair,daily_mode).dropna().sort_index()
-  # Align by portfolio week, not exact timestamp. Each portfolio observation receives
-  # the last genuine FX close from the same W-FRI week only; never carry across weeks.
-  fx_week=fx_raw.copy(); fx_week.index=fx_week.index.to_period('W-FRI').end_time.normalize(); fx_week=fx_week.groupby(level=0).last()
-  portfolio_week=pd.DatetimeIndex(prices.index).to_period('W-FRI').end_time.normalize()
-  fx=pd.Series(fx_week.reindex(portfolio_week).to_numpy(),index=prices.index,name=pair); fr=fx.pct_change(fill_method=None)
-  d=pd.concat([asset_total[asset].rename('asset'),fr.rename('fx')],axis=1).dropna()
-  if len(d)<12: raise RuntimeError(f'{asset}: fewer than 12 same-week aligned observations for FX beta estimation against {pair}')
-  if method=='1-Period Walk-Forward':
-   beta_series=pd.Series(np.nan,index=prices.index,dtype=float)
-   for dt in d.index:
-    hist=d.loc[d.index<dt]
-    if len(hist)<12: continue
-    var=float(hist.fx.var())
-    if var>0:
-     b=float(hist.asset.cov(hist.fx)/var)
-     if np.isfinite(b): beta_series.loc[dt]=b
-   hedge.loc[:,asset]=(-beta_series*fr).reindex(prices.index).fillna(0.0)
-   valid_beta=beta_series.dropna()
-   if valid_beta.empty: raise RuntimeError(f'{asset}: insufficient prior observations for 1-period walk-forward FX hedge against {pair}')
-   rows.append({'Instrument':asset,'FX Pair':pair,'Method':'1-Period Walk-Forward','Observations':len(d),'Hedged OOS Periods':len(valid_beta),'Alpha (periodic)':np.nan,'FX Beta / Hedge Ratio':float(valid_beta.iloc[-1]),'R²':np.nan,'Sample Start':d.index.min(),'Sample End':d.index.max()})
+def translate_currency(prices,divs,adjusted_assets,source_ccys,base_ccy,daily_mode):
+ out_p=prices.copy(); out_d=divs.copy(); rows=[]
+ for asset in adjusted_assets:
+  source=source_ccys[asset]
+  if source==base_ccy: continue
+  fx_raw,symbol=load_fx_pair(source,base_ccy,daily_mode)
+  if daily_mode:
+   fx=fx_raw.reindex(prices.index)
   else:
-   var=float(d.fx.var()); beta=float(d.asset.cov(d.fx)/var) if var>0 else np.nan
-   if not np.isfinite(beta): raise RuntimeError(f'{asset}: FX beta could not be estimated against {pair}')
-   alpha=float(d.asset.mean()-beta*d.fx.mean()); fitted=alpha+beta*d.fx; ssr=float(((d.asset-fitted)**2).sum()); sst=float(((d.asset-d.asset.mean())**2).sum()); r2=1-ssr/sst if sst>0 else np.nan
-   hedge.loc[:,asset]=(-beta*fr).reindex(prices.index).fillna(0.0)
-   rows.append({'Instrument':asset,'FX Pair':pair,'Method':'In-Sample','Observations':len(d),'Hedged OOS Periods':np.nan,'Alpha (periodic)':alpha,'FX Beta / Hedge Ratio':beta,'R²':r2,'Sample Start':d.index.min(),'Sample End':d.index.max()})
- return hedge,pd.DataFrame(rows)
+   fx_week=fx_raw.copy(); fx_week.index=fx_week.index.to_period('W-FRI').end_time.normalize(); fx_week=fx_week.groupby(level=0).last()
+   portfolio_week=pd.DatetimeIndex(prices.index).to_period('W-FRI').end_time.normalize()
+   fx=pd.Series(fx_week.reindex(portfolio_week).to_numpy(),index=prices.index,name=f'{source}/{base_ccy}')
+  missing=int(fx.isna().sum())
+  if missing: raise RuntimeError(f'{asset}: {missing} portfolio observation(s) have no same-period {source}/{base_ccy} FX rate')
+  out_p.loc[:,asset]=prices[asset].astype(float)*fx.astype(float)
+  out_d.loc[:,asset]=divs[asset].astype(float)*fx.astype(float)
+  rows.append({'Instrument':asset,'Source Currency':source,'Base Currency':base_ccy,'FX Series Used':symbol,'Observations':int(fx.notna().sum()),'Sample Start':fx.index.min(),'Sample End':fx.index.max()})
+ return out_p,out_d,pd.DataFrame(rows)
 
 @st.cache_data(ttl=3600,show_spinner=False)
 def load_macro_factors(daily_mode):
@@ -406,26 +400,22 @@ if USE_BENCHMARK:
 else:
  BENCHMARK=None
  st.caption('No benchmark selected. Portfolio analytics and standalone VaR remain available; benchmark beta/alpha/CAPM and benchmark stress are omitted.')
-st.markdown('**FX Hedging**')
+st.markdown('**Currency Exposure**')
 fxc1,fxc2=st.columns(2)
-with fxc1: FX_HEDGED=st.toggle('FX hedged',value=False)
-FX_HEDGE_METHOD='In-Sample'
-if FX_HEDGED:
- FX_HEDGE_METHOD=st.segmented_control('FX hedge estimation',['In-Sample','1-Period Walk-Forward'],default='In-Sample',help='In-Sample uses one beta estimated over the configured sample. 1-Period Walk-Forward estimates beta using only observations available before each week, then applies it to the next week; minimum 12 prior aligned observations.')
+with fxc1: FX_ADJUST=st.toggle('Adjust foreign assets to portfolio currency',value=False)
 with fxc2:
  BASE_CCY=PORTFOLIO_CCY
  st.text_input('Portfolio / base currency',value=BASE_CCY,disabled=True)
-HEDGED_ASSETS=[]; FX_PAIRS={}
-if FX_HEDGED:
- HEDGED_ASSETS=st.multiselect('Assets to FX hedge',options=ASSETS,default=[],help='Only assets already selected in the portfolio can be hedged.')
+FX_ADJUSTED_ASSETS=[]; SOURCE_CCYS={}
+if FX_ADJUST:
+ FX_ADJUSTED_ASSETS=st.multiselect('Assets to currency-adjust',options=ASSETS,default=[],help='Choose from the assets currently loaded into the portfolio. Unselected assets are left unchanged.')
  foreign_ccys=[x for x in ['USD','EUR','GBP','JPY','CHF','AUD','CAD','ZAR'] if x!=BASE_CCY]
- if HEDGED_ASSETS:
-  st.caption('Select the FX pair used to estimate each asset’s in-sample currency beta. Pair direction is foreign currency per base-currency quote convention as supplied by the market-data series.')
+ if FX_ADJUSTED_ASSETS:
+  st.caption('Select the source currency in which each selected Yahoo asset return is measured. The app translates that asset into the portfolio/base currency before the backtest.')
   fxcols=st.columns(3)
-  for i,a_fx in enumerate(HEDGED_ASSETS):
-   opts=[f'{ccy}{BASE_CCY}=X' for ccy in foreign_ccys]
-   default_i=opts.index(f'USD{BASE_CCY}=X') if f'USD{BASE_CCY}=X' in opts else 0
-   with fxcols[i%3]: FX_PAIRS[a_fx]=st.selectbox(f'{a_fx} FX pair',opts,index=default_i,key=f'fxpair_{a_fx}_{BASE_CCY}')
+  for i,a_fx in enumerate(FX_ADJUSTED_ASSETS):
+   default_i=foreign_ccys.index('USD') if 'USD' in foreign_ccys else 0
+   with fxcols[i%3]: SOURCE_CCYS[a_fx]=st.selectbox(f'{a_fx} source currency',foreign_ccys,index=default_i,key=f'fxccy_{a_fx}_{BASE_CCY}')
 st.markdown('**Weights**'); cols=st.columns(3); raww={}; default_sum=sum(DEFAULT_WEIGHTS.get(x,0.0) for x in ASSETS)
 for i,a0 in enumerate(ASSETS):
  default=(DEFAULT_WEIGHTS.get(a0,0.0)/default_sum*100) if default_sum>0 else 100/len(ASSETS)
@@ -456,24 +446,24 @@ try:
   if len(prices)<2: raise RuntimeError('Selected timeline has fewer than two synchronized portfolio observations')
   asset_r=(prices-prices.shift(1)+divs)/prices.shift(1); bad=asset_r.abs().max(); bad=bad[bad>(.35 if daily_mode else 1.0)]
   if len(bad): raise RuntimeError('Implausible asset return(s): '+', '.join(f'{k}={v:.1%}' for k,v in bad.items()))
-  fx_hedge_returns=pd.DataFrame(0.0,index=prices.index,columns=ASSETS); fx_hedge_report=pd.DataFrame()
-  if FX_HEDGED and HEDGED_ASSETS:
-   fx_hedge_returns,fx_hedge_report=estimate_fx_hedges(prices,divs,HEDGED_ASSETS,FX_PAIRS,daily_mode,FX_HEDGE_METHOD)
-  bh=portfolio_values(prices,divs,ALLOC,REINVEST,None,fx_hedge_returns)
+  fx_translation_report=pd.DataFrame()
+  if FX_ADJUST and FX_ADJUSTED_ASSETS:
+   prices,divs,fx_translation_report=translate_currency(prices,divs,FX_ADJUSTED_ASSETS,SOURCE_CCYS,BASE_CCY,daily_mode)
+  bh=portfolio_values(prices,divs,ALLOC,REINVEST,None)
 except Exception as e: st.error(f'Data update/validation failed: {e}'); st.exception(e); st.stop()
 data_flags=[]
 # Weekly alignment exclusions are documented in Data Audit; they are not promoted to DATA FLAGS unless they prevent the backtest.
 if USE_BENCHMARK and benchmark_missing_weeks>0: data_flags.append(f'Benchmark has {benchmark_missing_weeks} missing week(s) inside its overlap with the portfolio ({benchmark_overlap_start:%Y-%m-%d} to {benchmark_overlap_end:%Y-%m-%d}). Only those benchmark-dependent observations are dropped; portfolio history and portfolio-level analytics are unchanged.')
 if USE_BENCHMARK and benchmark_overlap_start>prices.index.min(): st.caption(f'Portfolio history begins {prices.index.min():%Y-%m-%d}. Benchmark-dependent analytics begin at the nearest available benchmark overlap date, {benchmark_overlap_start:%Y-%m-%d}; earlier portfolio observations remain in all portfolio-level calculations.')
 if start>requested: data_flags.append(f'Requested start {requested:%Y-%m-%d} unavailable for the selected common asset set; backtest starts at {start:%Y-%m-%d}.')
-frequency='weekly (Friday-labelled; last available trading close)'; st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} observations | Nominal {PORTFOLIO_CCY} {INITIAL:,.0f} | RF {RF:.2%} | Dividends '+('reinvested' if REINVEST else 'retained as cash')+(' | FX beta hedge active' if FX_HEDGED and HEDGED_ASSETS else ' | FX unhedged')+f' | Leverage {LEVERAGE:.1f}x | Financing cost {LEVERAGE_COST:.2%} p.a.')
-if FX_HEDGED and HEDGED_ASSETS and not fx_hedge_report.empty:
- st.subheader(f'FX Beta Hedge — {FX_HEDGE_METHOD}'); fxshow=fx_hedge_report.copy(); fxshow['Alpha (periodic)']=fxshow['Alpha (periodic)'].map(lambda x:f'{x:.4%}'); fxshow['FX Beta / Hedge Ratio']=fxshow['FX Beta / Hedge Ratio'].map(lambda x:f'{x:.4f}'); fxshow['R²']=fxshow['R²'].map(lambda x:f'{x:.4f}'); st.dataframe(fxshow,hide_index=True,use_container_width=True)
+frequency='weekly (Friday-labelled; last available trading close)'; st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} observations | Nominal {PORTFOLIO_CCY} {INITIAL:,.0f} | RF {RF:.2%} | Dividends '+('reinvested' if REINVEST else 'retained as cash')+(f' | FX translated to {BASE_CCY}: {len(FX_ADJUSTED_ASSETS)} asset(s)' if FX_ADJUST and FX_ADJUSTED_ASSETS else ' | FX translation off')+f' | Leverage {LEVERAGE:.1f}x | Financing cost {LEVERAGE_COST:.2%} p.a.')
+if FX_ADJUST and FX_ADJUSTED_ASSETS and not fx_translation_report.empty:
+ st.subheader('Currency Translation'); st.dataframe(fx_translation_report,hide_index=True,use_container_width=True)
 if data_flags: st.warning('DATA FLAGS — '+' | '.join(data_flags))
 mode=st.selectbox('Backtest mode',['Buy & Hold','Rebalanced'],index=0,key='backtest_mode')
 if mode=='Rebalanced':
  rebalance_frequency=st.selectbox('Rebalancing frequency',['Annual','Semi-Annual','Quarterly','Monthly','Weekly'],index=0,key='rebalance_frequency',help='Portfolio is reset to the configured target weights at the first available weekly observation of each selected rebalance period.')
- vals=portfolio_values(prices,divs,ALLOC,REINVEST,rebalance_frequency,fx_hedge_returns).copy()
+ vals=portfolio_values(prices,divs,ALLOC,REINVEST,rebalance_frequency).copy()
  mode_label=f'{rebalance_frequency} Rebalanced'
 else:
  rebalance_frequency=None; vals=bh.copy(); mode_label='Buy & Hold'
@@ -690,14 +680,12 @@ def show_latex_report():
  st.latex(r'DD^m_t=\frac{P^m_t}{\max_{s\le t}P^m_s}-1')
  st.latex(r'\mathcal S=\{t:DD^m_t\le-10\%\},\qquad \beta_{cond}=\frac{Cov(r_p,r_m\mid t\in\mathcal S)}{Var(r_m\mid t\in\mathcal S)}')
  st.write(f'Conditional beta='+('N/A' if not np.isfinite(cb) else f'{cb:.6f}')+f'; stress observations={ncb}.')
- st.header('21. FX beta hedging')
- st.latex(r'r_{i,t}=\alpha_i+\beta_{FX,i}r_{FX,t}+\epsilon_{i,t}')
- st.latex(r'\hat\beta_{FX,i}=\frac{\operatorname{Cov}(r_i,r_{FX})}{\operatorname{Var}(r_{FX})}')
- st.latex(r'h_{i,t}=-\hat\beta_{FX,i}r_{FX,t},\qquad P\&L^{hedge}_{i,t}=V_{i,t-1}^{market}h_{i,t}')
- st.latex(r'V^{hedged}_{i,t}=q_{i,t}P_{i,t}+C_{i,t}+P\&L^{hedge}_{i,t}')
- st.write('The FX beta is estimated in-sample over the currently configured common backtest window and is recalculated whenever the window, selected asset, frequency, or FX pair changes. The hedge is applied as a cash-settled return overlay to the prior-period market exposure; distributions remain explicit and are not replaced by Adjusted Close.')
- st.write(f'Base currency: {BASE_CCY}; FX hedge enabled: {FX_HEDGED}; hedged assets: {HEDGED_ASSETS}.')
- if FX_HEDGED and HEDGED_ASSETS and not fx_hedge_report.empty: st.dataframe(fx_hedge_report,hide_index=True,use_container_width=True)
+ st.header('21. Currency translation')
+ st.latex(r'1+r^{base}_{i,t}=(1+r^{local}_{i,t})(1+r^{FX}_{local/base,t})')
+ st.latex(r'P^{base}_{i,t}=P^{local}_{i,t}X_{local/base,t},\qquad D^{base}_{i,t}=D^{local}_{i,t}X_{local/base,t}')
+ st.write('For each user-selected asset, raw Yahoo Close and explicit cash distributions are translated from the user-selected source currency into the configured portfolio/base currency before portfolio construction. Assets not selected for currency adjustment are left unchanged.')
+ st.write(f'Base currency: {BASE_CCY}; currency adjustment enabled: {FX_ADJUST}; adjusted assets: {FX_ADJUSTED_ASSETS}.')
+ if FX_ADJUST and FX_ADJUSTED_ASSETS and not fx_translation_report.empty: st.dataframe(fx_translation_report,hide_index=True,use_container_width=True)
  st.header('22. Return attribution by instrument')
  st.latex(r'R_i^{tot}=R_i^{cap}+R_i^{inc},\qquad 1=\frac{R_i^{cap}}{R_i^{tot}}+\frac{R_i^{inc}}{R_i^{tot}}')
  st.dataframe(at,hide_index=True,use_container_width=True)
@@ -756,10 +744,10 @@ def show_audit_report():
  aligned_capm=pd.concat([vals.PORTFOLIO.pct_change(fill_method=None),bp.pct_change(fill_method=None)],axis=1).dropna()
  add('Regression','CAPM sample','PASS' if len(aligned_capm)>=24 else 'WARNING',f'{len(aligned_capm)} aligned portfolio/benchmark observations')
  add('Regression','Benchmark variance','PASS' if len(aligned_capm)>1 and aligned_capm.iloc[:,1].var()>0 else 'FAIL',f'variance={aligned_capm.iloc[:,1].var() if len(aligned_capm)>1 else np.nan:.8g}')
- if FX_HEDGED:
-  add('FX hedge','Hedged assets selected','PASS' if len(HEDGED_ASSETS)>0 else 'WARNING',f'{len(HEDGED_ASSETS)} selected')
-  if not fx_hedge_report.empty:
-   for _,r0 in fx_hedge_report.iterrows(): add('FX hedge',str(r0['Instrument'])+' regression sample','PASS' if int(r0['Observations'])>=24 else 'WARNING',f"{int(r0['Observations'])} obs; beta={r0['FX Beta / Hedge Ratio']:.4f}; R²={r0['R²']:.4f}")
+ if FX_ADJUST:
+  add('FX translation','Assets selected','PASS' if len(FX_ADJUSTED_ASSETS)>0 else 'WARNING',f'{len(FX_ADJUSTED_ASSETS)} selected')
+  if not fx_translation_report.empty:
+   for _,r0 in fx_translation_report.iterrows(): add('FX translation',str(r0['Instrument'])+' currency conversion','PASS',f"{r0['Source Currency']} → {r0['Base Currency']}; {int(r0['Observations'])} aligned observations; source={r0['FX Series Used']}")
  if not scenario_df.empty:
   for _,r0 in scenario_df.iterrows():
    n=int(r0.get('Historical Events',0)); add('Macro scenarios',str(r0.get('Scenario','Scenario'))+' event count','PASS' if n>=10 else ('WARNING' if n>=3 else 'FAIL'),f'{n} independent historical event(s)')
@@ -782,7 +770,7 @@ def show_audit_report():
  st.subheader('Complete audit checks'); st.dataframe(audit,hide_index=True,use_container_width=True)
  st.subheader('Instrument coverage'); st.dataframe(coverage_df,hide_index=True,use_container_width=True)
  st.subheader('Configured weights'); st.dataframe(pd.DataFrame({'Instrument':[instrument_names.get(x,x) for x in ASSETS],'Ticker':ASSETS,'Weight':[weights[x] for x in ASSETS]}),hide_index=True,use_container_width=True)
- if not fx_hedge_report.empty: st.subheader('FX hedge regression audit'); st.dataframe(fx_hedge_report,hide_index=True,use_container_width=True)
+ if not fx_translation_report.empty: st.subheader('FX translation audit'); st.dataframe(fx_translation_report,hide_index=True,use_container_width=True)
  if not scenario_df.empty: st.subheader('Scenario sample audit'); st.dataframe(scenario_df,hide_index=True,use_container_width=True)
  st.subheader('Methodology note'); st.write('Audit checks are run on the configured output and its underlying aligned data. Raw Close and explicit cash distributions are used; Adjusted Close is not used. PASS indicates no issue detected by the stated check, WARNING identifies a limitation or small sample requiring attention, and FAIL identifies a breached validation rule. The audit is diagnostic rather than a guarantee of source correctness.')
 
