@@ -127,18 +127,32 @@ def resolve_instrument_names(symbols):
    names[symbol]=symbol
  return names
 
+def _split_adjust_series(close,div,splits):
+ # Put historical raw Close and per-share dividends on the current share basis.
+ # A split at t adjusts observations strictly before t; the split-date close is already post-split.
+ ratios=splits.astype(float).replace(0.0,1.0).reindex(close.index,fill_value=1.0)
+ future_factor=ratios.iloc[::-1].cumprod().iloc[::-1]/ratios
+ if (future_factor<=0).any() or not np.isfinite(future_factor).all(): raise RuntimeError('Invalid stock-split factor in market data')
+ return close.astype(float)/future_factor,div.astype(float)/future_factor
+
 def build_master(selected):
  yahoo=[x for x in selected if x!='GOVI']; yp,yd,ys=load_ticker_components(tuple(yahoo)) if yahoo else ({},{},{})
  if yahoo:
-  daily_px=pd.concat([yp[x].rename(x) for x in yahoo],axis=1)
+  # Preserve the dynamic latest-common-genuine-close methodology.
+  sap={}; sad={}
+  for x in yahoo: sap[x],sad[x]=_split_adjust_series(yp[x],yd[x],ys[x])
+  daily_px=pd.concat([sap[x].rename(x) for x in yahoo],axis=1)
   mutual_daily=daily_px.dropna(how='any')
-  # For each Friday-labelled week, select the latest actual calendar date on which
-  # ALL selected assets have a genuine Close. Values remain genuine daily closes.
-  mp=mutual_daily.groupby(mutual_daily.index.to_period('W-FRI')).tail(1).copy()
-  mp.index=mp.index.to_period('W-FRI').end_time.normalize()
-  mp=mp[~mp.index.duplicated(keep='last')].sort_index()
-  # Cash distributions remain actual flows and are summed over their calendar week.
-  md=pd.DataFrame({x:yd[x].resample('W-FRI').sum() for x in yahoo}).reindex(mp.index,fill_value=0.0)
+  common_actual=mutual_daily.groupby(mutual_daily.index.to_period('W-FRI')).tail(1).copy()
+  actual_dates=pd.DatetimeIndex(common_actual.index)
+  friday_labels=actual_dates.to_period('W-FRI').end_time.normalize()
+  mp=common_actual.copy(); mp.index=friday_labels; mp=mp[~mp.index.duplicated(keep='last')].sort_index()
+  # Match distributions to the exact common-close holding interval (previous_actual, current_actual].
+  md=pd.DataFrame(0.0,index=mp.index,columns=yahoo)
+  for i in range(1,len(actual_dates)):
+   prev_dt=actual_dates[i-1]; curr_dt=actual_dates[i]; label=friday_labels[i]
+   for x in yahoo:
+    md.loc[label,x]=float(sad[x].loc[(sad[x].index>prev_dt)&(sad[x].index<=curr_dt)].sum())
  else:
   g0=load_govi_history(); mp=pd.DataFrame(index=g0.index); md=pd.DataFrame(index=g0.index)
  g=load_govi_history(); val={'last_govi':g.index.max(),'source':'repository GOVI'}
