@@ -147,21 +147,22 @@ def _reconstruct_daily_components(close,div,splits,reinvest):
 def build_master(selected,reinvest):
  yahoo=[x for x in selected if x!='GOVI']; yp,yd,ys=load_ticker_components(tuple(yahoo)) if yahoo else ({},{},{})
  if yahoo:
-  # Existing common-date methodology: within each W-FRI week, select the latest
-  # actual calendar date on which every selected ticker has a genuine Adjusted Close.
-  genuine_daily=pd.concat([yp[x].rename(x) for x in yahoo],axis=1)
-  mutual_daily=genuine_daily.dropna(how='any')
-  common_actual=mutual_daily.groupby(mutual_daily.index.to_period('W-FRI')).tail(1)
-  actual_dates=pd.DatetimeIndex(common_actual.index)
-  friday_labels=actual_dates.to_period('W-FRI').end_time.normalize()
-  mp=pd.DataFrame({x:yp[x].reindex(actual_dates).to_numpy() for x in yahoo},index=friday_labels)
-  mp=mp[~mp.index.duplicated(keep='last')].sort_index()
-  # Adjusted Close is the complete return input: never add dividends separately.
+  # DAILY Adjusted Close. Synchronize selected assets on the union daily calendar;
+  # missing observations carry the last genuine adjusted close forward. No dividends
+  # are added separately because Adjusted Close is the return input.
+  daily_index=pd.DatetimeIndex([])
+  for x in yahoo: daily_index=daily_index.union(yp[x].index)
+  daily_index=daily_index.sort_values()
+  first_common=max(yp[x].index.min() for x in yahoo)
+  last_common=min(yp[x].index.max() for x in yahoo)
+  daily_index=daily_index[(daily_index>=first_common)&(daily_index<=last_common)]
+  mp=pd.DataFrame({x:yp[x].reindex(daily_index) for x in yahoo},index=daily_index).ffill()
+  if mp.isna().any().any(): raise RuntimeError('Unable to establish synchronized daily Adjusted Close series after common inception')
   md=pd.DataFrame(0.0,index=mp.index,columns=yahoo)
  else:
   g0=load_govi_history(); mp=pd.DataFrame(index=g0.index); md=pd.DataFrame(index=g0.index)
  g=load_govi_history(); val={'last_govi':g.index.max(),'source':'repository GOVI'}
- if 'GOVI' in selected: raise RuntimeError('Repository GOVI is monthly-only. For the weekly backtest select a Yahoo-traded bond/index proxy with daily history instead.')
+ if 'GOVI' in selected: raise RuntimeError('Repository GOVI is monthly-only. For the backtest select a Yahoo-traded bond/index proxy with daily history instead.')
  return mp,md,g,val,ys
 
 def build_daily(selected):
@@ -809,7 +810,7 @@ def show_audit_report():
   if a0 in split_events:
    nsplit=int((split_events[a0]!=0).sum())
    add('Corporate actions',a0+' split handling','PASS',f'{nsplit} split event(s) identified; Yahoo Close is already split-adjusted, so split ratios are not applied a second time')
- add('Corporate actions','Processing order','PASS','Yahoo Adjusted Close is sampled at the latest genuine common date each week; no separate dividend cash flow is added')
+ add('Corporate actions','Processing order','PASS','Yahoo Adjusted Close is used daily on a synchronized calendar; missing observations carry the last genuine adjusted close forward; no separate dividend cash flow is added')
  if 'STXGVI.JO' in ASSETS: add('Source validation','STXGVI cents/ZAR normalisation','PASS','normalisation and distribution sanity checks completed before portfolio construction')
  if 'GOVI' in ASSETS: add('Source validation','GOVI repository history','PASS' if len(govi)>=100 else 'FAIL',f'{len(govi)} repository observations; last={govi.index.max():%Y-%m-%d}')
  audit=pd.DataFrame(checks); rank={'PASS':0,'WARNING':1,'FAIL':2}; worst=max((rank[x] for x in audit.Status),default=0); overall=['PASS','WARNING','FAIL'][worst]
