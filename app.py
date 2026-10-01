@@ -461,18 +461,18 @@ st.markdown('**Leverage & Financing**')
 lev1,lev2=st.columns(2)
 with lev1: LEVERAGE=float(st.number_input('Portfolio leverage (x)',min_value=1.0,max_value=10.0,value=1.0,step=.1,help='1.0x = no additional leverage. Applied to portfolio periodic returns after configured long/short weights.'))
 with lev2: LEVERAGE_COST=float(st.number_input('Annual leverage / financing cost (%)',min_value=0.0,max_value=100.0,value=0.0,step=.25,help='Annual financing rate charged on additional borrowed capital (leverage − 1).'))/100
-custom_days=(pd.Timestamp(custom_end)-pd.Timestamp(custom_start)).days if timeline=='Custom' and custom_start and custom_end else None; daily_mode=False; ppy=52
+custom_days=(pd.Timestamp(custom_end)-pd.Timestamp(custom_start)).days if timeline=='Custom' and custom_start and custom_end else None; daily_mode=True; ppy=252
 try:
  with st.spinner('Updating, configuring and validating market data…'):
   full_p,full_d,govi,bond_validation,split_events=build_master(ASSETS,REINVEST)
   asset_weekly=full_p[ASSETS]; first_valid=asset_weekly.apply(lambda c:c.first_valid_index()).dropna(); last_valid=asset_weekly.apply(lambda c:c.last_valid_index()).dropna(); common_inception=max(first_valid); common_endpoint=min(last_valid); comparable=asset_weekly.loc[(asset_weekly.index>=common_inception)&(asset_weekly.index<=common_endpoint)]; raw_week_count=len(comparable); missing_by_asset=comparable.isna().sum().astype(int).to_dict(); common=comparable.dropna(how='any').index; excluded_incomplete_weeks=int(comparable.isna().any(axis=1).sum()); start,end,requested=resolve_dates(common,timeline,custom_start,custom_end,daily_mode); prices=comparable.loc[(comparable.index>=start)&(comparable.index<=end),ASSETS].dropna(how='any'); divs=full_d.reindex(prices.index,fill_value=0.0)[ASSETS]
-  benchmark_missing_weeks=0; benchmark_overlap_start=None; benchmark_overlap_end=None
+  benchmark_missing_observations=0; benchmark_overlap_start=None; benchmark_overlap_end=None
   if USE_BENCHMARK:
    if BENCHMARK=='GOVI': raise RuntimeError('Repository GOVI is monthly-only and cannot be used as a weekly benchmark. Select a daily-history market ticker/proxy.')
-   bench_p,bench_d,_=load_ticker_components((BENCHMARK,)); bp_all=bench_p[BENCHMARK].resample('W-FRI').last(); bd_all=bench_d[BENCHMARK].resample('W-FRI').sum()
+   bench_p,bench_d,_=load_ticker_components((BENCHMARK,)); bp_all=bench_p[BENCHMARK].sort_index(); bd_all=pd.Series(0.0,index=bp_all.index,name=BENCHMARK)
    bench_valid=bp_all.dropna(); benchmark_overlap_start=max(prices.index.min(),bench_valid.index.min()); benchmark_overlap_end=min(prices.index.max(),bench_valid.index.max())
    benchmark_portfolio_index=prices.index[(prices.index>=benchmark_overlap_start)&(prices.index<=benchmark_overlap_end)]
-   benchmark_missing_weeks=int(bp_all.reindex(benchmark_portfolio_index).isna().sum())
+   benchmark_missing_observations=int(bp_all.reindex(benchmark_portfolio_index).isna().sum())
    bp=bp_all.reindex(prices.index); bd=bd_all.reindex(prices.index,fill_value=0.0)
   else:
    bp=pd.Series(np.nan,index=prices.index,dtype=float); bd=pd.Series(0.0,index=prices.index,dtype=float)
@@ -493,10 +493,10 @@ try:
 except Exception as e: st.error(f'Data update/validation failed: {e}'); st.exception(e); st.stop()
 data_flags=[]
 # Weekly alignment exclusions are documented in Data Audit; they are not promoted to DATA FLAGS unless they prevent the backtest.
-if USE_BENCHMARK and benchmark_missing_weeks>0: data_flags.append(f'Benchmark has {benchmark_missing_weeks} missing week(s) inside its overlap with the portfolio ({benchmark_overlap_start:%Y-%m-%d} to {benchmark_overlap_end:%Y-%m-%d}). Only those benchmark-dependent observations are dropped; portfolio history and portfolio-level analytics are unchanged.')
+if USE_BENCHMARK and benchmark_missing_observations>0: data_flags.append(f'Benchmark has {benchmark_missing_observations} missing genuine daily observation(s) inside its overlap with the portfolio ({benchmark_overlap_start:%Y-%m-%d} to {benchmark_overlap_end:%Y-%m-%d}). Only those benchmark-dependent observations are dropped; portfolio history and portfolio-level analytics are unchanged.')
 if USE_BENCHMARK and benchmark_overlap_start>prices.index.min(): st.caption(f'Portfolio history begins {prices.index.min():%Y-%m-%d}. Benchmark-dependent analytics begin at the nearest available benchmark overlap date, {benchmark_overlap_start:%Y-%m-%d}; earlier portfolio observations remain in all portfolio-level calculations.')
 if start>requested: data_flags.append(f'Requested start {requested:%Y-%m-%d} unavailable for the selected common asset set; backtest starts at {start:%Y-%m-%d}.')
-frequency='weekly (Friday-labelled; last available trading close)'; st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} observations | Nominal {PORTFOLIO_CCY} {INITIAL:,.0f} | RF {RF:.2%} | Dividends '+('reinvested' if REINVEST else 'retained as cash')+(f' | FX translated to {BASE_CCY}: {len(FX_ADJUSTED_ASSETS)} asset(s)' if FX_ADJUST and FX_ADJUSTED_ASSETS else ' | FX translation off')+f' | Leverage {LEVERAGE:.1f}x | Financing cost {LEVERAGE_COST:.2%} p.a.')
+frequency='daily (Adjusted Close; synchronized portfolio calendar)'; st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} observations | Nominal {PORTFOLIO_CCY} {INITIAL:,.0f} | RF {RF:.2%} | Dividends '+('reinvested' if REINVEST else 'retained as cash')+(f' | FX translated to {BASE_CCY}: {len(FX_ADJUSTED_ASSETS)} asset(s)' if FX_ADJUST and FX_ADJUSTED_ASSETS else ' | FX translation off')+f' | Leverage {LEVERAGE:.1f}x | Financing cost {LEVERAGE_COST:.2%} p.a.')
 if FX_ADJUST and FX_ADJUSTED_ASSETS and not fx_translation_report.empty:
  st.subheader('Currency Translation'); st.dataframe(fx_translation_report,hide_index=True,use_container_width=True)
 if USE_BENCHMARK and BENCHMARK_FX_ADJUST and not benchmark_fx_report.empty:
@@ -510,7 +510,7 @@ if mode=='Rebalanced':
 else:
  rebalance_frequency=None; vals=bh.copy(); mode_label='Buy & Hold'
 # Additional leverage is applied to the configured long/short portfolio return. Financing
-# cost is charged only on borrowed capital (L-1), converted to an effective weekly rate.
+# cost is charged only on borrowed capital (L-1), converted to the configured daily rate.
 base_portfolio=vals.PORTFOLIO.copy(); base_r=base_portfolio.pct_change(fill_method=None)
 weekly_financing=(1+LEVERAGE_COST)**(1/ppy)-1
 levered_r=LEVERAGE*base_r-(LEVERAGE-1.0)*weekly_financing
@@ -805,7 +805,7 @@ def show_audit_report():
    nb=int(wf['CAPM Forecast'].notna().sum()); add('Walk-forward','CAPM estimates available','PASS' if nb==len(wf) else 'WARNING',f'{nb}/{len(wf)} one-step CAPM forecasts available')
  if 'missing_by_asset' in globals():
   miss_txt=', '.join(f'{k}: {v}' for k,v in missing_by_asset.items() if v) or 'none'
-  add('Alignment','Complete-case weekly alignment','PASS' if excluded_incomplete_weeks==0 and benchmark_missing_weeks==0 else 'WARNING',f'Weekly observations use the latest genuine daily date shared by all selected assets within each Friday-labelled week. Comparable weeks={raw_week_count} ({common_inception:%Y-%m-%d} to {common_endpoint:%Y-%m-%d}); unrecoverable asset weeks excluded={excluded_incomplete_weeks}; benchmark-missing portfolio weeks={benchmark_missing_weeks}; portfolio weeks retained={len(prices)}. Benchmark-missing dates are dropped only from benchmark-dependent analytics; portfolio-level history and standalone risk/return calculations are unchanged. No interpolation or cross-week forward fill.')
+  add('Alignment','Complete-case weekly alignment','PASS' if excluded_incomplete_weeks==0 and benchmark_missing_observations==0 else 'WARNING',f'Daily portfolio observations use the synchronized Adjusted Close calendar. Comparable weeks={raw_week_count} ({common_inception:%Y-%m-%d} to {common_endpoint:%Y-%m-%d}); unrecoverable asset weeks excluded={excluded_incomplete_weeks}; benchmark-missing portfolio observations={benchmark_missing_observations}; portfolio observations retained={len(prices)}. Benchmark-missing dates are dropped only from benchmark-dependent analytics; portfolio-level history and standalone risk/return calculations are unchanged. No benchmark interpolation, zero-filling, or benchmark forward-fill.')
  for a0 in ASSETS:
   if a0 in split_events:
    nsplit=int((split_events[a0]!=0).sum())
