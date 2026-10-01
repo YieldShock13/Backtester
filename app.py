@@ -128,22 +128,21 @@ def resolve_instrument_names(symbols):
  return names
 
 def _reconstruct_daily_components(close,div,splits,reinvest):
- # Vectorised daily corporate-action reconstruction before weekly sampling.
+ # Yahoo Close is already split-adjusted. Stock-split events are retained for audit
+ # but must NOT be applied again. Dividends are processed on the full daily path
+ # before the reconstructed series is sampled at weekly common dates.
  c=close.astype(float)
  d=div.astype(float).reindex(c.index,fill_value=0.0)
  sp=splits.astype(float).reindex(c.index,fill_value=0.0)
  bad=sp[(sp!=0)&((sp<=0)|(~np.isfinite(sp)))]
  if len(bad): raise RuntimeError(f'Invalid stock split on {bad.index[0].date()}: {bad.iloc[0]}')
- split_factor=sp.where(sp!=0,1.0).cumprod()
  if not reinvest:
-  units=split_factor
-  return (units*c).rename(c.name),(units*d).rename(d.name)
+  return c.rename(c.name),d.rename(d.name)
  bad_reinvest=(d!=0)&((c<=0)|(~np.isfinite(c)))
  if bad_reinvest.any():
   dt=bad_reinvest[bad_reinvest].index[0]; raise RuntimeError(f'Invalid reinvestment price on {dt.date()}: {c.loc[dt]}')
  reinvest_factor=(1.0+(d/c).where(d!=0,0.0)).cumprod()
- units=split_factor*reinvest_factor
- return (units*c).rename(c.name),pd.Series(0.0,index=c.index,name=d.name)
+ return (reinvest_factor*c).rename(c.name),pd.Series(0.0,index=c.index,name=d.name)
 
 def build_master(selected,reinvest):
  yahoo=[x for x in selected if x!='GOVI']; yp,yd,ys=load_ticker_components(tuple(yahoo)) if yahoo else ({},{},{})
@@ -810,8 +809,8 @@ def show_audit_report():
  for a0 in ASSETS:
   if a0 in split_events:
    nsplit=int((split_events[a0]!=0).sum())
-   add('Corporate actions',a0+' daily split reconstruction','PASS',f'{nsplit} split event(s) processed on the full daily series before weekly common-date sampling')
- add('Corporate actions','Processing order','PASS','Daily splits/dividends reconstructed first; latest genuine common close is sampled only after reconstruction')
+   add('Corporate actions',a0+' split handling','PASS',f'{nsplit} split event(s) identified; Yahoo Close is already split-adjusted, so split ratios are not applied a second time')
+ add('Corporate actions','Processing order','PASS','Daily dividends are reconstructed first; Yahoo split-adjusted Close carries split effects; latest genuine common close is sampled only afterward')
  if 'STXGVI.JO' in ASSETS: add('Source validation','STXGVI cents/ZAR normalisation','PASS','normalisation and distribution sanity checks completed before portfolio construction')
  if 'GOVI' in ASSETS: add('Source validation','GOVI repository history','PASS' if len(govi)>=100 else 'FAIL',f'{len(govi)} repository observations; last={govi.index.max():%Y-%m-%d}')
  audit=pd.DataFrame(checks); rank={'PASS':0,'WARNING':1,'FAIL':2}; worst=max((rank[x] for x in audit.Status),default=0); overall=['PASS','WARNING','FAIL'][worst]
