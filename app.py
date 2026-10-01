@@ -153,23 +153,24 @@ def _reconstruct_daily_components(close,div,splits,reinvest):
 def build_master(selected,reinvest):
  yahoo=[x for x in selected if x!='GOVI']; yp,yd,ys=load_ticker_components(tuple(yahoo)) if yahoo else ({},{},{})
  if yahoo:
-  # Weekly architecture: latest genuine common Close in each W-FRI period.
   genuine_daily=pd.concat([yp[x].rename(x) for x in yahoo],axis=1)
   mutual_daily=genuine_daily.dropna(how='any')
   common_actual=mutual_daily.groupby(mutual_daily.index.to_period('W-FRI')).tail(1)
   actual_dates=pd.DatetimeIndex(common_actual.index)
   friday_labels=actual_dates.to_period('W-FRI').end_time.normalize()
-  mp=pd.DataFrame({x:yp[x].reindex(actual_dates).to_numpy() for x in yahoo},index=friday_labels)
+  reconstructed_price={}; reconstructed_div={}
+  for x in yahoo:
+   reconstructed_price[x],reconstructed_div[x]=_reconstruct_daily_components(yp[x],yd[x],ys[x],reinvest)
+  mp=pd.DataFrame({x:reconstructed_price[x].reindex(actual_dates).to_numpy() for x in yahoo},index=friday_labels)
   mp=mp[~mp.index.duplicated(keep='last')].sort_index()
   md=pd.DataFrame(0.0,index=mp.index,columns=yahoo)
-  # Preserve all dividend events and assign each once to the interval
-  # (previous genuine common date, current genuine common date].
-  for x in yahoo:
-   events=yd[x].astype(float).sort_index()
-   union=events.index.union(actual_dates).sort_values()
-   cum=events.reindex(union,fill_value=0.0).cumsum()
-   vals=cum.reindex(actual_dates).to_numpy(dtype=float)
-   md[x]=np.r_[0.0,np.diff(vals)]
+  if not reinvest:
+   for x in yahoo:
+    events=reconstructed_div[x].astype(float)
+    union=events.index.union(actual_dates).sort_values()
+    cum=events.reindex(union,fill_value=0.0).cumsum()
+    vals=cum.reindex(actual_dates).to_numpy(dtype=float)
+    md[x]=np.r_[0.0,np.diff(vals)]
  else:
   g0=load_govi_history(); mp=pd.DataFrame(index=g0.index); md=pd.DataFrame(index=g0.index)
  g=load_govi_history(); val={'last_govi':g.index.max(),'source':'repository GOVI'}
@@ -477,7 +478,6 @@ try:
  with st.spinner('Updating, configuring and validating market data…'):
   full_p,full_d,govi,bond_validation,split_events=build_master(ASSETS,REINVEST)
   asset_weekly=full_p[ASSETS]; first_valid=asset_weekly.apply(lambda c:c.first_valid_index()).dropna(); last_valid=asset_weekly.apply(lambda c:c.last_valid_index()).dropna(); common_inception=max(first_valid); common_endpoint=min(last_valid); comparable=asset_weekly.loc[(asset_weekly.index>=common_inception)&(asset_weekly.index<=common_endpoint)]; raw_week_count=len(comparable); missing_by_asset=comparable.isna().sum().astype(int).to_dict(); common=comparable.dropna(how='any').index; excluded_incomplete_weeks=int(comparable.isna().any(axis=1).sum()); start,end,requested=resolve_dates(common,timeline,custom_start,custom_end,daily_mode); prices=comparable.loc[(comparable.index>=start)&(comparable.index<=end),ASSETS].dropna(how='any'); divs=full_d.reindex(prices.index,fill_value=0.0)[ASSETS]
-  st.info(f'Backtest observation window: {prices.index.min():%Y-%m-%d} to {prices.index.max():%Y-%m-%d} | {len(prices):,} synchronized weekly observations')
   benchmark_missing_weeks=0; benchmark_overlap_start=None; benchmark_overlap_end=None
   if USE_BENCHMARK:
    if BENCHMARK=='GOVI': raise RuntimeError('Repository GOVI is monthly-only and cannot be used as a weekly benchmark. Select a daily-history market ticker/proxy.')
@@ -822,7 +822,7 @@ def show_audit_report():
   if a0 in split_events:
    nsplit=int((split_events[a0]!=0).sum())
    add('Corporate actions',a0+' split handling','PASS',f'{nsplit} split event(s) identified; Yahoo Close is already split-adjusted, so split ratios are not applied a second time')
- add('Corporate actions','Processing order','PASS','Portfolio economics are constructed on a synchronized daily calendar using last genuine Close carried forward on non-trading days; dividends are applied daily before weekly sampling')
+ add('Corporate actions','Processing order','PASS','Full repaired daily action stream is preserved. Non-reinvested dividends are accumulated into exact common-date intervals; reinvested dividends buy units on the event date before weekly sampling')
  if 'STXGVI.JO' in ASSETS: add('Source validation','STXGVI cents/ZAR normalisation','PASS','normalisation and distribution sanity checks completed before portfolio construction')
  if 'GOVI' in ASSETS: add('Source validation','GOVI repository history','PASS' if len(govi)>=100 else 'FAIL',f'{len(govi)} repository observations; last={govi.index.max():%Y-%m-%d}')
  audit=pd.DataFrame(checks); rank={'PASS':0,'WARNING':1,'FAIL':2}; worst=max((rank[x] for x in audit.Status),default=0); overall=['PASS','WARNING','FAIL'][worst]
