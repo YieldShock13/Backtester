@@ -153,24 +153,41 @@ def _reconstruct_daily_components(close,div,splits,reinvest):
 def build_master(selected,reinvest):
  yahoo=[x for x in selected if x!='GOVI']; yp,yd,ys=load_ticker_components(tuple(yahoo)) if yahoo else ({},{},{})
  if yahoo:
-  genuine_daily=pd.concat([yp[x].rename(x) for x in yahoo],axis=1)
-  mutual_daily=genuine_daily.dropna(how='any')
-  common_actual=mutual_daily.groupby(mutual_daily.index.to_period('W-FRI')).tail(1)
-  actual_dates=pd.DatetimeIndex(common_actual.index)
-  friday_labels=actual_dates.to_period('W-FRI').end_time.normalize()
-  reconstructed_price={}; reconstructed_div={}
+  # Build one DAILY portfolio calendar from the union of genuine price dates and
+  # corporate-action dates. Each asset keeps its last genuine Close until it trades again.
+  daily_index=pd.DatetimeIndex([])
   for x in yahoo:
-   reconstructed_price[x],reconstructed_div[x]=_reconstruct_daily_components(yp[x],yd[x],ys[x],reinvest)
-  mp=pd.DataFrame({x:reconstructed_price[x].reindex(actual_dates).to_numpy() for x in yahoo},index=friday_labels)
-  mp=mp[~mp.index.duplicated(keep='last')].sort_index()
-  md=pd.DataFrame(0.0,index=mp.index,columns=yahoo)
+   daily_index=daily_index.union(yp[x].index).union(yd[x].index)
+  daily_index=daily_index.sort_values()
+  raw=pd.DataFrame({x:yp[x].reindex(daily_index) for x in yahoo},index=daily_index)
+  first_common=max(yp[x].index.min() for x in yahoo)
+  last_common=min(yp[x].index.max() for x in yahoo)
+  raw=raw.loc[(raw.index>=first_common)&(raw.index<=last_common)]
+  daily_index=raw.index
+  # Forward-fill only: no interpolation and no invented price movement.
+  daily_prices=raw.ffill()
+  if daily_prices.isna().any().any(): raise RuntimeError('Unable to establish synchronized daily prices after common inception')
+  daily_divs=pd.DataFrame({x:yd[x].reindex(daily_index,fill_value=0.0) for x in yahoo},index=daily_index).fillna(0.0)
+  if reinvest:
+   # Reinvest each dividend on its event date using that day's genuine/last-carried price.
+   factors=1.0+daily_divs.div(daily_prices)
+   wealth_factor=factors.cumprod()
+   economic_daily=daily_prices*wealth_factor
+   cash_daily=pd.DataFrame(0.0,index=daily_index,columns=yahoo)
+  else:
+   economic_daily=daily_prices
+   cash_daily=daily_divs
+  # Weekly reporting is now only a sampling layer over the completed DAILY path.
+  week_period=daily_index.to_period('W-FRI')
+  sample_pos=pd.Series(np.arange(len(daily_index)),index=daily_index).groupby(week_period).last()
+  actual_dates=pd.DatetimeIndex(sample_pos.index.map(lambda p: daily_index[np.where(week_period==p)[0][-1]]))
+  friday_labels=actual_dates.to_period('W-FRI').end_time.normalize()
+  mp=pd.DataFrame({x:economic_daily[x].reindex(actual_dates).to_numpy() for x in yahoo},index=friday_labels)
+  md=pd.DataFrame(0.0,index=friday_labels,columns=yahoo)
   if not reinvest:
    for x in yahoo:
-    events=reconstructed_div[x].astype(float)
-    union=events.index.union(actual_dates).sort_values()
-    cum=events.reindex(union,fill_value=0.0).cumsum()
-    vals=cum.reindex(actual_dates).to_numpy(dtype=float)
-    md[x]=np.r_[0.0,np.diff(vals)]
+    cum=cash_daily[x].cumsum().reindex(actual_dates).to_numpy(dtype=float)
+    md[x]=np.r_[0.0,np.diff(cum)]
  else:
   g0=load_govi_history(); mp=pd.DataFrame(index=g0.index); md=pd.DataFrame(index=g0.index)
  g=load_govi_history(); val={'last_govi':g.index.max(),'source':'repository GOVI'}
@@ -823,7 +840,7 @@ def show_audit_report():
   if a0 in split_events:
    nsplit=int((split_events[a0]!=0).sum())
    add('Corporate actions',a0+' split handling','PASS',f'{nsplit} split event(s) identified; Yahoo Close is already split-adjusted, so split ratios are not applied a second time')
- add('Corporate actions','Processing order','PASS','Full repaired daily action stream is preserved. Non-reinvested dividends are accumulated into exact common-date intervals; reinvested dividends buy units on the event date before weekly sampling')
+ add('Corporate actions','Processing order','PASS','Portfolio economics are constructed on a synchronized daily calendar using last genuine Close carried forward on non-trading days; dividends are applied daily before weekly sampling')
  if 'STXGVI.JO' in ASSETS: add('Source validation','STXGVI cents/ZAR normalisation','PASS','normalisation and distribution sanity checks completed before portfolio construction')
  if 'GOVI' in ASSETS: add('Source validation','GOVI repository history','PASS' if len(govi)>=100 else 'FAIL',f'{len(govi)} repository observations; last={govi.index.max():%Y-%m-%d}')
  audit=pd.DataFrame(checks); rank={'PASS':0,'WARNING':1,'FAIL':2}; worst=max((rank[x] for x in audit.Status),default=0); overall=['PASS','WARNING','FAIL'][worst]
