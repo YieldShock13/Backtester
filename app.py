@@ -416,6 +416,13 @@ if FX_ADJUST:
   for i,a_fx in enumerate(FX_ADJUSTED_ASSETS):
    default_i=foreign_ccys.index('USD') if 'USD' in foreign_ccys else 0
    with fxcols[i%3]: SOURCE_CCYS[a_fx]=st.selectbox(f'{a_fx} source currency',foreign_ccys,index=default_i,key=f'fxccy_{a_fx}_{BASE_CCY}')
+BENCHMARK_FX_ADJUST=False; BENCHMARK_SOURCE_CCY=None
+if USE_BENCHMARK:
+ BENCHMARK_FX_ADJUST=st.toggle('Currency-adjust benchmark to portfolio currency',value=False,help='Optional. Use when the selected benchmark is quoted in a currency different from the portfolio/base currency.')
+ if BENCHMARK_FX_ADJUST:
+  benchmark_ccys=[x for x in ['USD','EUR','GBP','JPY','CHF','AUD','CAD','ZAR'] if x!=BASE_CCY]
+  benchmark_default=benchmark_ccys.index('USD') if 'USD' in benchmark_ccys else 0
+  BENCHMARK_SOURCE_CCY=st.selectbox('Benchmark source currency',benchmark_ccys,index=benchmark_default,key=f'benchmark_fxccy_{BENCHMARK}_{BASE_CCY}')
 st.markdown('**Weights**'); cols=st.columns(3); raww={}; default_sum=sum(DEFAULT_WEIGHTS.get(x,0.0) for x in ASSETS)
 for i,a0 in enumerate(ASSETS):
  default=(DEFAULT_WEIGHTS.get(a0,0.0)/default_sum*100) if default_sum>0 else 100/len(ASSETS)
@@ -444,6 +451,11 @@ try:
   else:
    bp=pd.Series(np.nan,index=prices.index,dtype=float); bd=pd.Series(0.0,index=prices.index,dtype=float)
   if len(prices)<2: raise RuntimeError('Selected timeline has fewer than two synchronized portfolio observations')
+  benchmark_fx_report=pd.DataFrame()
+  if USE_BENCHMARK and BENCHMARK_FX_ADJUST:
+   bp_frame=pd.DataFrame({BENCHMARK:bp},index=prices.index); bd_frame=pd.DataFrame({BENCHMARK:bd},index=prices.index)
+   bp_frame,bd_frame,benchmark_fx_report=translate_currency(bp_frame,bd_frame,[BENCHMARK],{BENCHMARK:BENCHMARK_SOURCE_CCY},BASE_CCY,daily_mode)
+   bp=bp_frame[BENCHMARK]; bd=bd_frame[BENCHMARK]
   fx_translation_report=pd.DataFrame()
   if FX_ADJUST and FX_ADJUSTED_ASSETS:
    prices,divs,fx_translation_report=translate_currency(prices,divs,FX_ADJUSTED_ASSETS,SOURCE_CCYS,BASE_CCY,daily_mode)
@@ -461,6 +473,8 @@ if start>requested: data_flags.append(f'Requested start {requested:%Y-%m-%d} una
 frequency='weekly (Friday-labelled; last available trading close)'; st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} observations | Nominal {PORTFOLIO_CCY} {INITIAL:,.0f} | RF {RF:.2%} | Dividends '+('reinvested' if REINVEST else 'retained as cash')+(f' | FX translated to {BASE_CCY}: {len(FX_ADJUSTED_ASSETS)} asset(s)' if FX_ADJUST and FX_ADJUSTED_ASSETS else ' | FX translation off')+f' | Leverage {LEVERAGE:.1f}x | Financing cost {LEVERAGE_COST:.2%} p.a.')
 if FX_ADJUST and FX_ADJUSTED_ASSETS and not fx_translation_report.empty:
  st.subheader('Currency Translation'); st.dataframe(fx_translation_report,hide_index=True,use_container_width=True)
+if USE_BENCHMARK and BENCHMARK_FX_ADJUST and not benchmark_fx_report.empty:
+ st.subheader('Benchmark Currency Translation'); st.dataframe(benchmark_fx_report,hide_index=True,use_container_width=True)
 if data_flags: st.warning('DATA FLAGS — '+' | '.join(data_flags))
 mode=st.selectbox('Backtest mode',['Buy & Hold','Rebalanced'],index=0,key='backtest_mode')
 if mode=='Rebalanced':
@@ -686,8 +700,9 @@ def show_latex_report():
  st.latex(r'1+r^{base}_{i,t}=(1+r^{local}_{i,t})(1+r^{FX}_{local/base,t})')
  st.latex(r'P^{base}_{i,t}=P^{local}_{i,t}X_{local/base,t},\qquad D^{base}_{i,t}=D^{local}_{i,t}X_{local/base,t}')
  st.write('For each user-selected asset, raw Yahoo Close and explicit cash distributions are translated from the user-selected source currency into the configured portfolio/base currency before portfolio construction. Assets not selected for currency adjustment are left unchanged.')
- st.write(f'Base currency: {BASE_CCY}; currency adjustment enabled: {FX_ADJUST}; adjusted assets: {FX_ADJUSTED_ASSETS}.')
+ st.write(f'Base currency: {BASE_CCY}; currency adjustment enabled: {FX_ADJUST}; adjusted assets: {FX_ADJUSTED_ASSETS}. Benchmark currency adjustment enabled: {BENCHMARK_FX_ADJUST if USE_BENCHMARK else False}.')
  if FX_ADJUST and FX_ADJUSTED_ASSETS and not fx_translation_report.empty: st.dataframe(fx_translation_report,hide_index=True,use_container_width=True)
+ if USE_BENCHMARK and BENCHMARK_FX_ADJUST and not benchmark_fx_report.empty: st.dataframe(benchmark_fx_report,hide_index=True,use_container_width=True)
  st.header('22. Return attribution by instrument')
  st.latex(r'R_i^{tot}=R_i^{cap}+R_i^{inc},\qquad 1=\frac{R_i^{cap}}{R_i^{tot}}+\frac{R_i^{inc}}{R_i^{tot}}')
  st.dataframe(at,hide_index=True,use_container_width=True)
@@ -750,6 +765,10 @@ def show_audit_report():
   add('FX translation','Assets selected','PASS' if len(FX_ADJUSTED_ASSETS)>0 else 'WARNING',f'{len(FX_ADJUSTED_ASSETS)} selected')
   if not fx_translation_report.empty:
    for _,r0 in fx_translation_report.iterrows(): add('FX translation',str(r0['Instrument'])+' currency conversion','PASS',f"{r0['Source Currency']} → {r0['Base Currency']}; {int(r0['Observations'])} aligned observations; source={r0['FX Series Used']}")
+ if USE_BENCHMARK and BENCHMARK_FX_ADJUST:
+  if not benchmark_fx_report.empty:
+   for _,r0 in benchmark_fx_report.iterrows(): add('Benchmark FX translation',str(r0['Instrument'])+' currency conversion','PASS',f"{r0['Source Currency']} → {r0['Base Currency']}; {int(r0['Observations'])} aligned observations; source={r0['FX Series Used']}")
+  else: add('Benchmark FX translation','Benchmark conversion','FAIL','Benchmark currency adjustment enabled but no translation audit row was produced')
  if not scenario_df.empty:
   for _,r0 in scenario_df.iterrows():
    n=int(r0.get('Historical Events',0)); add('Macro scenarios',str(r0.get('Scenario','Scenario'))+' event count','PASS' if n>=10 else ('WARNING' if n>=3 else 'FAIL'),f'{n} independent historical event(s)')
@@ -773,6 +792,7 @@ def show_audit_report():
  st.subheader('Instrument coverage'); st.dataframe(coverage_df,hide_index=True,use_container_width=True)
  st.subheader('Configured weights'); st.dataframe(pd.DataFrame({'Instrument':[instrument_names.get(x,x) for x in ASSETS],'Ticker':ASSETS,'Weight':[weights[x] for x in ASSETS]}),hide_index=True,use_container_width=True)
  if not fx_translation_report.empty: st.subheader('FX translation audit'); st.dataframe(fx_translation_report,hide_index=True,use_container_width=True)
+ if USE_BENCHMARK and BENCHMARK_FX_ADJUST and not benchmark_fx_report.empty: st.subheader('Benchmark FX translation audit'); st.dataframe(benchmark_fx_report,hide_index=True,use_container_width=True)
  if not scenario_df.empty: st.subheader('Scenario sample audit'); st.dataframe(scenario_df,hide_index=True,use_container_width=True)
  st.subheader('Methodology note'); st.write('Audit checks are run on the configured output and its underlying aligned data. Raw Close and explicit cash distributions are used; Adjusted Close is not used. PASS indicates no issue detected by the stated check, WARNING identifies a limitation or small sample requiring attention, and FAIL identifies a breached validation rule. The audit is diagnostic rather than a guarantee of source correctness.')
 
