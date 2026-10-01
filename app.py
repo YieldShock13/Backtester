@@ -127,21 +127,14 @@ def resolve_instrument_names(symbols):
    names[symbol]=symbol
  return names
 
-def _split_adjust_series(close,div,splits):
- # Put historical raw Close and per-share dividends on the current share basis.
- # A split at t adjusts observations strictly before t; the split-date close is already post-split.
- ratios=splits.astype(float).replace(0.0,1.0).reindex(close.index,fill_value=1.0)
- future_factor=ratios.iloc[::-1].cumprod().iloc[::-1]/ratios
- if (future_factor<=0).any() or not np.isfinite(future_factor).all(): raise RuntimeError('Invalid stock-split factor in market data')
- return close.astype(float)/future_factor,div.astype(float)/future_factor
-
 def build_master(selected):
  yahoo=[x for x in selected if x!='GOVI']; yp,yd,ys=load_ticker_components(tuple(yahoo)) if yahoo else ({},{},{})
  if yahoo:
   # Preserve the dynamic latest-common-genuine-close methodology.
-  sap={}; sad={}
-  for x in yahoo: sap[x],sad[x]=_split_adjust_series(yp[x],yd[x],ys[x])
-  daily_px=pd.concat([sap[x].rename(x) for x in yahoo],axis=1)
+  # Yahoo historical Close is already split-adjusted. Do not apply split factors again.
+  # Keep explicit cash dividends separate so total return is not dividend-adjusted twice.
+  sad=yd
+  daily_px=pd.concat([yp[x].rename(x) for x in yahoo],axis=1)
   mutual_daily=daily_px.dropna(how='any')
   common_actual=mutual_daily.groupby(mutual_daily.index.to_period('W-FRI')).tail(1).copy()
   actual_dates=pd.DatetimeIndex(common_actual.index)
