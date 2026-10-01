@@ -59,31 +59,34 @@ def load_govi_history():
 
 @st.cache_data(ttl=3600,show_spinner=False)
 def load_ticker_components(tickers):
- prices={}; divs={}; splits={}; audits=[]
+ prices={}; divs={}; splits={}
  for ticker in tickers:
   t=yf.Ticker(ticker)
-  # yfinance's generic daily repair handles currency-unit errors, missing/bad
-  # dividend adjustments, missing splits and corrupt daily observations.
+  # Repair raw market inputs first. Yahoo Adj Close is not the accounting source.
   h=t.history(period='max',interval='1d',auto_adjust=False,actions=True,repair=True,keepna=True)
   if h.empty: raise RuntimeError(f'Market-data source returned no data for ticker {ticker}')
   h=h.copy(); h.index=pd.to_datetime(h.index).tz_localize(None); h=h.sort_index()
-  if 'Adj Close' not in h.columns: raise RuntimeError(f'{ticker}: repaired adjusted price is unavailable')
-  adj=pd.to_numeric(h['Adj Close'],errors='coerce')
-  close=pd.to_numeric(h['Close'],errors='coerce')
-  repaired=h.get('Repaired?',pd.Series(False,index=h.index)).fillna(False).astype(bool)
-  valid=adj.dropna()
-  if len(valid)<2: raise RuntimeError(f'{ticker}: fewer than two valid repaired adjusted-price observations')
-  if (valid<=0).any(): raise RuntimeError(f'{ticker}: repaired adjusted-price series contains non-positive values')
-  ret=valid.pct_change(fill_method=None)
-  # Do not invent a generic correction for unexplained discontinuities. A very
-  # large move survives only if the source repair pipeline itself accepts it;
-  # surface it prominently in the audit for review.
-  extreme=ret[ret.abs()>.50]
-  prices[ticker]=valid.rename(ticker)
+  close=pd.to_numeric(h.get('Close'),errors='coerce')
+  div=pd.to_numeric(h.get('Dividends',pd.Series(0.0,index=h.index)),errors='coerce').fillna(0.0)
+  sp=pd.to_numeric(h.get('Stock Splits',pd.Series(0.0,index=h.index)),errors='coerce').fillna(0.0)
+  valid=close.dropna()
+  if len(valid)<2: raise RuntimeError(f'{ticker}: fewer than two valid repaired Close observations')
+  if (valid<=0).any(): raise RuntimeError(f'{ticker}: repaired Close contains non-positive values')
+  event_div=pd.Series(0.0,index=valid.index,dtype=float)
+  for dt,dv in div[div!=0].items():
+   pos=valid.index.searchsorted(dt,side='left')
+   if pos<len(valid): event_div.iloc[pos]+=float(dv)
+  tr=(valid+event_div)/valid.shift(1)-1.0
+  bad=tr[tr.abs()>.50]
+  if len(bad):
+   dt=bad.index[0]
+   raise RuntimeError(f'{ticker}: repaired source still contains an unexplained >50% daily total return on {dt.date()} ({bad.iloc[0]:.1%}); backtest stopped rather than altering the observation')
+  level=pd.Series(index=valid.index,dtype=float,name=ticker)
+  level.iloc[0]=100.0
+  level.iloc[1:]=100.0*(1.0+tr.iloc[1:]).cumprod().to_numpy()
+  prices[ticker]=level
   divs[ticker]=pd.Series(0.0,index=h.index,dtype=float,name=ticker)
-  splits[ticker]=pd.to_numeric(h.get('Stock Splits',pd.Series(0.0,index=h.index)),errors='coerce').fillna(0.0).rename(ticker)
-  audits.append({'Series':ticker,'Source':'Yahoo daily history + yfinance repair','Valid Values':int(valid.notna().sum()),'Source-Repaired Rows':int(repaired.sum()),'Largest Absolute Daily Return':float(ret.abs().max()) if ret.notna().any() else np.nan,'Extreme >50% Days':int(len(extreme))})
- load_ticker_components.last_audit=pd.DataFrame(audits)
+  splits[ticker]=sp.rename(ticker)
  return prices,divs,splits
 
 @st.cache_data(ttl=3600,show_spinner=False)
@@ -514,7 +517,7 @@ data_flags=[]
 if USE_BENCHMARK and benchmark_missing_weeks>0: data_flags.append(f'Benchmark had {benchmark_missing_weeks} missing daily level(s) inside its overlap with the portfolio; these levels were time-interpolated and recorded in Data Audit.')
 if USE_BENCHMARK and benchmark_overlap_start>prices.index.min(): st.caption(f'Portfolio history begins {prices.index.min():%Y-%m-%d}. Benchmark-dependent analytics begin at the nearest available benchmark overlap date, {benchmark_overlap_start:%Y-%m-%d}; earlier portfolio observations remain in all portfolio-level calculations.')
 if start>requested: data_flags.append(f'Requested start {requested:%Y-%m-%d} unavailable for the selected common asset set; backtest starts at {start:%Y-%m-%d}.')
-frequency='daily (repaired adjusted-return levels; missing aligned levels interpolated)'; st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} | Nominal {PORTFOLIO_CCY} {INITIAL:,.0f} | RF {RF:.2%} | Adjusted returns (distributions embedded)'+(f' | FX translated to {BASE_CCY}: {len(FX_ADJUSTED_ASSETS)} asset(s)' if FX_ADJUST and FX_ADJUSTED_ASSETS else ' | FX translation off')+f' | Leverage {LEVERAGE:.1f}x | Financing cost {LEVERAGE_COST:.2%} p.a.')
+frequency='daily (total-return levels from repaired Close + distributions; missing aligned levels interpolated)'; st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} | Nominal {PORTFOLIO_CCY} {INITIAL:,.0f} | RF {RF:.2%} | Adjusted returns (distributions embedded)'+(f' | FX translated to {BASE_CCY}: {len(FX_ADJUSTED_ASSETS)} asset(s)' if FX_ADJUST and FX_ADJUSTED_ASSETS else ' | FX translation off')+f' | Leverage {LEVERAGE:.1f}x | Financing cost {LEVERAGE_COST:.2%} p.a.')
 if FX_ADJUST and FX_ADJUSTED_ASSETS and not fx_translation_report.empty:
  st.subheader('Currency Translation'); st.dataframe(fx_translation_report,hide_index=True,use_container_width=True)
 if USE_BENCHMARK and BENCHMARK_FX_ADJUST and not benchmark_fx_report.empty:
@@ -665,7 +668,7 @@ def show_latex_report():
  st.latex(r'r_{i,t}=\frac{P_{i,t}-P_{i,t-1}+D_{i,t}}{P_{i,t-1}}')
  st.latex(r'R^{cap}_i=\frac{P_{i,T}-P_{i,0}}{P_{i,0}},\quad R^{inc}_i=\frac{\sum_{t=1}^{T}D_{i,t}}{P_{i,0}},\quad R^{tot}_i=R^{cap}_i+R^{inc}_i')
  st.latex(r'\omega^{cap}_i=R^{cap}_i/R^{tot}_i,\quad \omega^{inc}_i=R^{inc}_i/R^{tot}_i')
- st.write('Daily repaired adjusted-return levels are used consistently across all tickers. The source repair pipeline is generic: currency-unit errors, missing/bad dividend adjustments, missing splits and corrupt daily observations are repaired before alignment. No ticker-specific price normalisation is applied. Distributions are not added separately because they are embedded in the adjusted-return level.')
+ st.write('Daily total-return levels are constructed consistently from repaired raw Close and repaired distributions. Yahoo Adjusted Close is not used as the accounting source. The same source-repair and total-return formula is applied to every ticker; no ticker-specific normalisation is applied. Distributions are embedded once in the constructed total-return level.')
  st.dataframe(pd.DataFrame({'Instrument':[instrument_names.get(i,i) for i in ASSETS],'Ticker / Series':ASSETS,'Initial Price':[prices[i].iloc[0] for i in ASSETS],'Final Price':[prices[i].iloc[-1] for i in ASSETS],'Cash Distributions':[divs[i].iloc[1:].sum() for i in ASSETS]}),hide_index=True,use_container_width=True)
  st.header('2. Portfolio initialisation and accounting identity')
  st.latex(r'A_{i,0}=w_iV_0,\qquad q_{i,0}=\frac{A_{i,0}}{P_{i,0}},\qquad \sum_iw_i=1')
@@ -831,7 +834,7 @@ def show_audit_report():
   if a0 in split_events:
    nsplit=int((split_events[a0]!=0).sum())
    add('Corporate actions',a0+' split handling','PASS',f'{nsplit} split event(s) identified; Yahoo Close is already split-adjusted, so split ratios are not applied a second time')
- add('Corporate actions','Adjusted-return treatment','PASS','Daily Adjusted Close is used as the return series. Cash distributions are embedded in adjusted prices and are not added separately, preventing double counting.')
+ add('Corporate actions','Adjusted-return treatment','PASS','Daily total-return levels are constructed from repaired Close plus repaired distributions. Cash distributions are embedded exactly once in the constructed level and are not added again downstream.')
  if 'STXGVI.JO' in ASSETS: add('Source validation','STXGVI cents/ZAR normalisation','PASS','normalisation and distribution sanity checks completed before portfolio construction')
  if 'GOVI' in ASSETS: add('Source validation','GOVI repository history','PASS' if len(govi)>=100 else 'FAIL',f'{len(govi)} repository observations; last={govi.index.max():%Y-%m-%d}')
  audit=pd.DataFrame(checks); rank={'PASS':0,'WARNING':1,'FAIL':2}; worst=max((rank[x] for x in audit.Status),default=0); overall=['PASS','WARNING','FAIL'][worst]
@@ -850,7 +853,7 @@ def show_audit_report():
  if not fx_translation_report.empty: st.subheader('FX translation audit'); st.dataframe(fx_translation_report,hide_index=True,use_container_width=True)
  if USE_BENCHMARK and BENCHMARK_FX_ADJUST and not benchmark_fx_report.empty: st.subheader('Benchmark FX translation audit'); st.dataframe(benchmark_fx_report,hide_index=True,use_container_width=True)
  if not scenario_df.empty: st.subheader('Scenario sample audit'); st.dataframe(scenario_df,hide_index=True,use_container_width=True)
- st.subheader('Methodology note'); st.write('Audit checks are run on the configured output and its underlying aligned data. Daily repaired adjusted-return levels are used for asset and benchmark returns. The same source-repair methodology is applied to every Yahoo ticker; no ticker-specific price rule is used. Missing internal aligned levels are time-interpolated between genuine observations and explicitly counted above. Distributions are embedded in adjusted prices and are not added separately. PASS indicates no issue detected by the stated check, WARNING identifies a limitation or small sample requiring attention, and FAIL identifies a breached validation rule. The audit is diagnostic rather than a guarantee of source correctness.')
+ st.subheader('Methodology note'); st.write('Audit checks are run on the configured output and its underlying aligned data. Daily total-return levels constructed from repaired Close plus repaired distributions are used for asset and benchmark returns. Yahoo Adjusted Close is not used as the accounting source. The same methodology is applied to every Yahoo ticker; no ticker-specific price rule is used. Missing internal aligned levels are time-interpolated between genuine observations and explicitly counted above. Distributions are embedded in adjusted prices and are not added separately. PASS indicates no issue detected by the stated check, WARNING identifies a limitation or small sample requiring attention, and FAIL identifies a breached validation rule. The audit is diagnostic rather than a guarantee of source correctness.')
 
 if latex_slot.button('Show LaTeX',use_container_width=True): show_latex_report()
 if audit_slot.button('Data Audit',use_container_width=True): show_audit_report()
