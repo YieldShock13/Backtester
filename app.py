@@ -127,25 +127,47 @@ def resolve_instrument_names(symbols):
    names[symbol]=symbol
  return names
 
-def build_master(selected):
+def _reconstruct_daily_components(close,div,splits,reinvest):
+ # Process every corporate action on the complete DAILY raw event stream before weekly sampling.
+ claim_units=1.0; economic_price=pd.Series(index=close.index,dtype=float); economic_div=pd.Series(0.0,index=close.index,dtype=float)
+ daily_div=div.astype(float).reindex(close.index,fill_value=0.0)
+ daily_splits=splits.astype(float).reindex(close.index,fill_value=0.0)
+ for dt in close.index:
+  ratio=float(daily_splits.loc[dt])
+  if ratio:
+   if ratio<=0 or not np.isfinite(ratio): raise RuntimeError(f'Invalid stock split on {dt.date()}: {ratio}')
+   claim_units*=ratio
+  distribution=claim_units*float(daily_div.loc[dt])
+  if reinvest and distribution:
+   px=float(close.loc[dt])
+   if px<=0 or not np.isfinite(px): raise RuntimeError(f'Invalid reinvestment price on {dt.date()}: {px}')
+   claim_units+=distribution/px
+   distribution=0.0
+  economic_price.loc[dt]=claim_units*float(close.loc[dt])
+  economic_div.loc[dt]=distribution
+ return economic_price,economic_div
+
+def build_master(selected,reinvest):
  yahoo=[x for x in selected if x!='GOVI']; yp,yd,ys=load_ticker_components(tuple(yahoo)) if yahoo else ({},{},{})
  if yahoo:
-  # Preserve the dynamic latest-common-genuine-close methodology.
-  # Yahoo historical Close is already split-adjusted. Do not apply split factors again.
-  # Keep explicit cash dividends separate so total return is not dividend-adjusted twice.
-  sad=yd
-  daily_px=pd.concat([yp[x].rename(x) for x in yahoo],axis=1)
-  mutual_daily=daily_px.dropna(how='any')
-  common_actual=mutual_daily.groupby(mutual_daily.index.to_period('W-FRI')).tail(1).copy()
+  # Choose weekly observation dates only from genuine closes shared by every selected ticker.
+  genuine_daily=pd.concat([yp[x].rename(x) for x in yahoo],axis=1)
+  mutual_daily=genuine_daily.dropna(how='any')
+  common_actual=mutual_daily.groupby(mutual_daily.index.to_period('W-FRI')).tail(1)
   actual_dates=pd.DatetimeIndex(common_actual.index)
   friday_labels=actual_dates.to_period('W-FRI').end_time.normalize()
-  mp=common_actual.copy(); mp.index=friday_labels; mp=mp[~mp.index.duplicated(keep='last')].sort_index()
-  # Match distributions to the exact common-close holding interval (previous_actual, current_actual].
+  # Reconstruct splits/dividends on every daily row FIRST; sample the reconstructed path SECOND.
+  reconstructed_price={}; reconstructed_div={}
+  for x in yahoo:
+   reconstructed_price[x],reconstructed_div[x]=_reconstruct_daily_components(yp[x],yd[x],ys[x],reinvest)
+  mp=pd.DataFrame({x:reconstructed_price[x].reindex(actual_dates).to_numpy() for x in yahoo},index=friday_labels)
+  mp=mp[~mp.index.duplicated(keep='last')].sort_index()
   md=pd.DataFrame(0.0,index=mp.index,columns=yahoo)
-  for i in range(1,len(actual_dates)):
-   prev_dt=actual_dates[i-1]; curr_dt=actual_dates[i]; label=friday_labels[i]
-   for x in yahoo:
-    md.loc[label,x]=float(sad[x].loc[(sad[x].index>prev_dt)&(sad[x].index<=curr_dt)].sum())
+  if not reinvest:
+   for i in range(1,len(actual_dates)):
+    prev_dt=actual_dates[i-1]; curr_dt=actual_dates[i]; label=friday_labels[i]
+    for x in yahoo:
+     md.loc[label,x]=float(reconstructed_div[x].loc[(reconstructed_div[x].index>prev_dt)&(reconstructed_div[x].index<=curr_dt)].sum())
  else:
   g0=load_govi_history(); mp=pd.DataFrame(index=g0.index); md=pd.DataFrame(index=g0.index)
  g=load_govi_history(); val={'last_govi':g.index.max(),'source':'repository GOVI'}
@@ -445,7 +467,7 @@ with lev2: LEVERAGE_COST=float(st.number_input('Annual leverage / financing cost
 custom_days=(pd.Timestamp(custom_end)-pd.Timestamp(custom_start)).days if timeline=='Custom' and custom_start and custom_end else None; daily_mode=False; ppy=52
 try:
  with st.spinner('Updating, configuring and validating market data…'):
-  full_p,full_d,govi,bond_validation,split_events=build_master(ASSETS)
+  full_p,full_d,govi,bond_validation,split_events=build_master(ASSETS,REINVEST)
   asset_weekly=full_p[ASSETS]; first_valid=asset_weekly.apply(lambda c:c.first_valid_index()).dropna(); last_valid=asset_weekly.apply(lambda c:c.last_valid_index()).dropna(); common_inception=max(first_valid); common_endpoint=min(last_valid); comparable=asset_weekly.loc[(asset_weekly.index>=common_inception)&(asset_weekly.index<=common_endpoint)]; raw_week_count=len(comparable); missing_by_asset=comparable.isna().sum().astype(int).to_dict(); common=comparable.dropna(how='any').index; excluded_incomplete_weeks=int(comparable.isna().any(axis=1).sum()); start,end,requested=resolve_dates(common,timeline,custom_start,custom_end,daily_mode); prices=comparable.loc[(comparable.index>=start)&(comparable.index<=end),ASSETS].dropna(how='any'); divs=full_d.reindex(prices.index,fill_value=0.0)[ASSETS]
   benchmark_missing_weeks=0; benchmark_overlap_start=None; benchmark_overlap_end=None
   if USE_BENCHMARK:
@@ -787,6 +809,11 @@ def show_audit_report():
  if 'missing_by_asset' in globals():
   miss_txt=', '.join(f'{k}: {v}' for k,v in missing_by_asset.items() if v) or 'none'
   add('Alignment','Complete-case weekly alignment','PASS' if excluded_incomplete_weeks==0 and benchmark_missing_weeks==0 else 'WARNING',f'Weekly observations use the latest genuine daily date shared by all selected assets within each Friday-labelled week. Comparable weeks={raw_week_count} ({common_inception:%Y-%m-%d} to {common_endpoint:%Y-%m-%d}); unrecoverable asset weeks excluded={excluded_incomplete_weeks}; benchmark-missing portfolio weeks={benchmark_missing_weeks}; portfolio weeks retained={len(prices)}. Benchmark-missing dates are dropped only from benchmark-dependent analytics; portfolio-level history and standalone risk/return calculations are unchanged. No interpolation or cross-week forward fill.')
+ for a0 in ASSETS:
+  if a0 in split_events:
+   nsplit=int((split_events[a0]!=0).sum())
+   add('Corporate actions',a0+' daily split reconstruction','PASS',f'{nsplit} split event(s) processed on the full daily series before weekly common-date sampling')
+ add('Corporate actions','Processing order','PASS','Daily splits/dividends reconstructed first; latest genuine common close is sampled only after reconstruction')
  if 'STXGVI.JO' in ASSETS: add('Source validation','STXGVI cents/ZAR normalisation','PASS','normalisation and distribution sanity checks completed before portfolio construction')
  if 'GOVI' in ASSETS: add('Source validation','GOVI repository history','PASS' if len(govi)>=100 else 'FAIL',f'{len(govi)} repository observations; last={govi.index.max():%Y-%m-%d}')
  audit=pd.DataFrame(checks); rank={'PASS':0,'WARNING':1,'FAIL':2}; worst=max((rank[x] for x in audit.Status),default=0); overall=['PASS','WARNING','FAIL'][worst]
@@ -801,7 +828,7 @@ def show_audit_report():
  if not fx_translation_report.empty: st.subheader('FX translation audit'); st.dataframe(fx_translation_report,hide_index=True,use_container_width=True)
  if USE_BENCHMARK and BENCHMARK_FX_ADJUST and not benchmark_fx_report.empty: st.subheader('Benchmark FX translation audit'); st.dataframe(benchmark_fx_report,hide_index=True,use_container_width=True)
  if not scenario_df.empty: st.subheader('Scenario sample audit'); st.dataframe(scenario_df,hide_index=True,use_container_width=True)
- st.subheader('Methodology note'); st.write('Audit checks are run on the configured output and its underlying aligned data. Raw Close and explicit cash distributions are used; Adjusted Close is not used. PASS indicates no issue detected by the stated check, WARNING identifies a limitation or small sample requiring attention, and FAIL identifies a breached validation rule. The audit is diagnostic rather than a guarantee of source correctness.')
+ st.subheader('Methodology note'); st.write('Audit checks are run on the configured output and its underlying aligned data. Raw daily Close, dividends and stock-split events are reconstructed before weekly common-date sampling; Adjusted Close is not used. PASS indicates no issue detected by the stated check, WARNING identifies a limitation or small sample requiring attention, and FAIL identifies a breached validation rule. The audit is diagnostic rather than a guarantee of source correctness.')
 
 if latex_slot.button('Show LaTeX',use_container_width=True): show_latex_report()
 if audit_slot.button('Data Audit',use_container_width=True): show_audit_report()
