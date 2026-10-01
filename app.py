@@ -75,15 +75,32 @@ def load_ticker_components(tickers):
   h=yf.Ticker(ticker).history(period='max',interval='1d',auto_adjust=False,actions=True,keepna=True)
   if h.empty: raise RuntimeError(f'Market-data source returned no data for ticker {ticker}')
   h=h.copy(); h.index=pd.to_datetime(h.index).tz_localize(None); h=h.sort_index()
-  if 'Adj Close' not in h.columns: raise RuntimeError(f'{ticker}: adjusted price is unavailable from the market-data source')
-  close=pd.to_numeric(h['Adj Close'],errors='coerce').dropna()
-  # Adjusted price is the return series used by the backtest; distributions are
-  # therefore not added separately (which would double count them).
-  div=pd.Series(0.0,index=h.index,dtype=float)
+  # Build the adjusted-return level ourselves from raw Close + distributions.
+  # Yahoo Adj Close is not used because it can contain broken historical adjustment
+  # factors for some indices/funds (e.g. discontinuities of thousands of percent).
+  close=pd.to_numeric(h['Close'],errors='coerce').dropna()
+  raw_div=pd.to_numeric(h.get('Dividends',pd.Series(0.0,index=h.index)),errors='coerce').fillna(0.0)
   sp=pd.to_numeric(h.get('Stock Splits',pd.Series(0.0,index=h.index)),errors='coerce').fillna(0.0)
-  if ticker.upper()=='STXGVI.JO': close=_normalise_stxgvi_close(close)
-  if len(close)<2: raise RuntimeError(f'{ticker}: fewer than two valid adjusted-price observations')
-  prices[ticker]=close.rename(ticker); divs[ticker]=div.rename(ticker); splits[ticker]=sp.rename(ticker)
+  if ticker.upper()=='STXGVI.JO':
+   close=_normalise_stxgvi_close(close)
+   raw_div=raw_div/100.0
+  if len(close)<2: raise RuntimeError(f'{ticker}: fewer than two valid Close observations')
+  # Put each cash distribution on its actual trading observation (or first genuine
+  # Close after an action-only row), then construct a daily total-return index.
+  event_div=pd.Series(0.0,index=close.index,dtype=float)
+  for dt,dv in raw_div[raw_div!=0].items():
+   pos=close.index.searchsorted(dt,side='left')
+   if pos<len(close): event_div.iloc[pos]+=float(dv)
+  daily_tr=(close-close.shift(1)+event_div)/close.shift(1)
+  bad_tr=daily_tr.abs()>0.50
+  if bad_tr.any():
+   dt=bad_tr[bad_tr].index[0]
+   raise RuntimeError(f'{ticker}: raw Close/distribution series has an implausible one-day total return on {dt.date()}: {daily_tr.loc[dt]:.1%}')
+  adjusted_level=pd.Series(index=close.index,dtype=float,name=ticker)
+  adjusted_level.iloc[0]=float(close.iloc[0])
+  adjusted_level.iloc[1:]=float(close.iloc[0])*(1.0+daily_tr.iloc[1:]).cumprod().to_numpy()
+  div=pd.Series(0.0,index=h.index,dtype=float)
+  prices[ticker]=adjusted_level; divs[ticker]=div.rename(ticker); splits[ticker]=sp.rename(ticker)
  return prices,divs,splits
 
 @st.cache_data(ttl=3600,show_spinner=False)
@@ -510,7 +527,7 @@ data_flags=[]
 if USE_BENCHMARK and benchmark_missing_weeks>0: data_flags.append(f'Benchmark had {benchmark_missing_weeks} missing daily level(s) inside its overlap with the portfolio; these levels were time-interpolated and recorded in Data Audit.')
 if USE_BENCHMARK and benchmark_overlap_start>prices.index.min(): st.caption(f'Portfolio history begins {prices.index.min():%Y-%m-%d}. Benchmark-dependent analytics begin at the nearest available benchmark overlap date, {benchmark_overlap_start:%Y-%m-%d}; earlier portfolio observations remain in all portfolio-level calculations.')
 if start>requested: data_flags.append(f'Requested start {requested:%Y-%m-%d} unavailable for the selected common asset set; backtest starts at {start:%Y-%m-%d}.')
-frequency='daily (adjusted-price observations; missing aligned levels interpolated)'; st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} | Nominal {PORTFOLIO_CCY} {INITIAL:,.0f} | RF {RF:.2%} | Adjusted returns (distributions embedded)'+(f' | FX translated to {BASE_CCY}: {len(FX_ADJUSTED_ASSETS)} asset(s)' if FX_ADJUST and FX_ADJUSTED_ASSETS else ' | FX translation off')+f' | Leverage {LEVERAGE:.1f}x | Financing cost {LEVERAGE_COST:.2%} p.a.')
+frequency='daily (reconstructed adjusted-return levels; missing aligned levels interpolated)'; st.caption(f'Configured window {prices.index[0]:%d %b %Y} to {prices.index[-1]:%d %b %Y} | {frequency} | Nominal {PORTFOLIO_CCY} {INITIAL:,.0f} | RF {RF:.2%} | Adjusted returns (distributions embedded)'+(f' | FX translated to {BASE_CCY}: {len(FX_ADJUSTED_ASSETS)} asset(s)' if FX_ADJUST and FX_ADJUSTED_ASSETS else ' | FX translation off')+f' | Leverage {LEVERAGE:.1f}x | Financing cost {LEVERAGE_COST:.2%} p.a.')
 if FX_ADJUST and FX_ADJUSTED_ASSETS and not fx_translation_report.empty:
  st.subheader('Currency Translation'); st.dataframe(fx_translation_report,hide_index=True,use_container_width=True)
 if USE_BENCHMARK and BENCHMARK_FX_ADJUST and not benchmark_fx_report.empty:
@@ -661,7 +678,7 @@ def show_latex_report():
  st.latex(r'r_{i,t}=\frac{P_{i,t}-P_{i,t-1}+D_{i,t}}{P_{i,t-1}}')
  st.latex(r'R^{cap}_i=\frac{P_{i,T}-P_{i,0}}{P_{i,0}},\quad R^{inc}_i=\frac{\sum_{t=1}^{T}D_{i,t}}{P_{i,0}},\quad R^{tot}_i=R^{cap}_i+R^{inc}_i')
  st.latex(r'\omega^{cap}_i=R^{cap}_i/R^{tot}_i,\quad \omega^{inc}_i=R^{inc}_i/R^{tot}_i')
- st.write('Daily Adjusted Close is used as the return series. Distributions are embedded in adjusted prices and are not added separately. STXGVI uses the validated cents/ZAR normalisation. No automatic FX overlay is applied.')
+ st.write('Daily adjusted-return levels are reconstructed from raw Close plus distributions on their actual event dates. Yahoo Adjusted Close is not used because broken historical adjustment factors can create false discontinuities. Distributions are then not added separately. STXGVI uses the validated cents/ZAR normalisation. No automatic FX overlay is applied.')
  st.dataframe(pd.DataFrame({'Instrument':[instrument_names.get(i,i) for i in ASSETS],'Ticker / Series':ASSETS,'Initial Price':[prices[i].iloc[0] for i in ASSETS],'Final Price':[prices[i].iloc[-1] for i in ASSETS],'Cash Distributions':[divs[i].iloc[1:].sum() for i in ASSETS]}),hide_index=True,use_container_width=True)
  st.header('2. Portfolio initialisation and accounting identity')
  st.latex(r'A_{i,0}=w_iV_0,\qquad q_{i,0}=\frac{A_{i,0}}{P_{i,0}},\qquad \sum_iw_i=1')
@@ -846,7 +863,7 @@ def show_audit_report():
  if not fx_translation_report.empty: st.subheader('FX translation audit'); st.dataframe(fx_translation_report,hide_index=True,use_container_width=True)
  if USE_BENCHMARK and BENCHMARK_FX_ADJUST and not benchmark_fx_report.empty: st.subheader('Benchmark FX translation audit'); st.dataframe(benchmark_fx_report,hide_index=True,use_container_width=True)
  if not scenario_df.empty: st.subheader('Scenario sample audit'); st.dataframe(scenario_df,hide_index=True,use_container_width=True)
- st.subheader('Methodology note'); st.write('Audit checks are run on the configured output and its underlying aligned data. Daily Adjusted Close is used for asset and benchmark returns. Missing internal aligned levels are time-interpolated between genuine observations and explicitly counted above. Distributions are embedded in adjusted prices and are not added separately. PASS indicates no issue detected by the stated check, WARNING identifies a limitation or small sample requiring attention, and FAIL identifies a breached validation rule. The audit is diagnostic rather than a guarantee of source correctness.')
+ st.subheader('Methodology note'); st.write('Audit checks are run on the configured output and its underlying aligned data. Daily adjusted-return levels reconstructed from raw Close plus actual-date distributions are used for asset and benchmark returns. Missing internal aligned levels are time-interpolated between genuine observations and explicitly counted above. Distributions are embedded in adjusted prices and are not added separately. PASS indicates no issue detected by the stated check, WARNING identifies a limitation or small sample requiring attention, and FAIL identifies a breached validation rule. The audit is diagnostic rather than a guarantee of source correctness.')
 
 if latex_slot.button('Show LaTeX',use_container_width=True): show_latex_report()
 if audit_slot.button('Data Audit',use_container_width=True): show_audit_report()
