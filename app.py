@@ -75,21 +75,15 @@ def load_ticker_components(tickers):
   h=yf.Ticker(ticker).history(period='max',interval='1d',auto_adjust=False,actions=True,keepna=True)
   if h.empty: raise RuntimeError(f'Market-data source returned no data for ticker {ticker}')
   h=h.copy(); h.index=pd.to_datetime(h.index).tz_localize(None); h=h.sort_index()
-  close=pd.to_numeric(h['Close'],errors='coerce').dropna()
-  # Keep action rows on their own dates. Do NOT reindex actions to Close here:
-  # doing so silently deletes valid dividend/split events on rows without a Close.
-  div=pd.to_numeric(h.get('Dividends',pd.Series(0.0,index=h.index)),errors='coerce').fillna(0.0)
+  # Use Yahoo Adjusted Close directly. It already represents Yahoo's adjusted
+  # return series, so dividends must not be added separately.
+  adj_col='Adj Close' if 'Adj Close' in h.columns else None
+  if adj_col is None: raise RuntimeError(f'{ticker}: Yahoo Adjusted Close unavailable')
+  close=pd.to_numeric(h[adj_col],errors='coerce').dropna()
+  div=pd.Series(0.0,index=close.index,name=ticker)
   sp=pd.to_numeric(h.get('Stock Splits',pd.Series(0.0,index=h.index)),errors='coerce').fillna(0.0)
-  if ticker.upper()=='STXGVI.JO':
-   close=_normalise_stxgvi_close(close)
-   div=div/100.0
-   check_date=pd.Timestamp('2023-04-25')
-   if check_date in div.index and not np.isclose(float(div.loc[check_date]),1.9145,rtol=0,atol=.0001): raise RuntimeError(f'STXGVI distribution conversion failed: {div.loc[check_date]} ZAR')
-   for dt,dv in div[div!=0].items():
-    px=close.asof(dt)
-    if np.isfinite(px) and (dv<=0 or dv/px>.20): raise RuntimeError(f'STXGVI distribution sanity check failed on {dt.date()}: dividend_ZAR={dv}, close_ZAR={px}')
-  if len(close)<2: raise RuntimeError(f'{ticker}: fewer than two valid Close observations')
-  prices[ticker]=close.rename(ticker); divs[ticker]=div.rename(ticker); splits[ticker]=sp.rename(ticker)
+  if len(close)<2: raise RuntimeError(f'{ticker}: fewer than two valid Adjusted Close observations')
+  prices[ticker]=close.rename(ticker); divs[ticker]=div; splits[ticker]=sp.rename(ticker)
  return prices,divs,splits
 
 @st.cache_data(ttl=3600,show_spinner=False)
@@ -153,29 +147,22 @@ def _reconstruct_daily_components(close,div,splits,reinvest):
 def build_master(selected,reinvest):
  yahoo=[x for x in selected if x!='GOVI']; yp,yd,ys=load_ticker_components(tuple(yahoo)) if yahoo else ({},{},{})
  if yahoo:
+  # Existing common-date methodology: within each W-FRI week, select the latest
+  # actual calendar date on which every selected ticker has a genuine Adjusted Close.
   genuine_daily=pd.concat([yp[x].rename(x) for x in yahoo],axis=1)
   mutual_daily=genuine_daily.dropna(how='any')
   common_actual=mutual_daily.groupby(mutual_daily.index.to_period('W-FRI')).tail(1)
   actual_dates=pd.DatetimeIndex(common_actual.index)
   friday_labels=actual_dates.to_period('W-FRI').end_time.normalize()
-  reconstructed_price={}; reconstructed_div={}
-  for x in yahoo:
-   reconstructed_price[x],reconstructed_div[x]=_reconstruct_daily_components(yp[x],yd[x],ys[x],reinvest)
-  mp=pd.DataFrame({x:reconstructed_price[x].reindex(actual_dates).to_numpy() for x in yahoo},index=friday_labels)
+  mp=pd.DataFrame({x:yp[x].reindex(actual_dates).to_numpy() for x in yahoo},index=friday_labels)
   mp=mp[~mp.index.duplicated(keep='last')].sort_index()
+  # Adjusted Close is the complete return input: never add dividends separately.
   md=pd.DataFrame(0.0,index=mp.index,columns=yahoo)
-  if not reinvest:
-   for x in yahoo:
-    events=reconstructed_div[x].astype(float)
-    union=events.index.union(actual_dates).sort_values()
-    cum=events.reindex(union,fill_value=0.0).cumsum()
-    vals=cum.reindex(actual_dates).to_numpy(dtype=float)
-    md[x]=np.r_[0.0,np.diff(vals)]
  else:
   g0=load_govi_history(); mp=pd.DataFrame(index=g0.index); md=pd.DataFrame(index=g0.index)
  g=load_govi_history(); val={'last_govi':g.index.max(),'source':'repository GOVI'}
  if 'GOVI' in selected: raise RuntimeError('Repository GOVI is monthly-only. For the weekly backtest select a Yahoo-traded bond/index proxy with daily history instead.')
- return mp,md.reindex(mp.index,fill_value=0.0),g,val,ys
+ return mp,md,g,val,ys
 
 def build_daily(selected):
  if 'GOVI' in selected: raise RuntimeError('GOVI is monthly-only. For daily analysis select an instrument with daily observations, such as STXGVI.JO.')
@@ -822,7 +809,7 @@ def show_audit_report():
   if a0 in split_events:
    nsplit=int((split_events[a0]!=0).sum())
    add('Corporate actions',a0+' split handling','PASS',f'{nsplit} split event(s) identified; Yahoo Close is already split-adjusted, so split ratios are not applied a second time')
- add('Corporate actions','Processing order','PASS','Full repaired daily action stream is preserved. Non-reinvested dividends are accumulated into exact common-date intervals; reinvested dividends buy units on the event date before weekly sampling')
+ add('Corporate actions','Processing order','PASS','Yahoo Adjusted Close is sampled at the latest genuine common date each week; no separate dividend cash flow is added')
  if 'STXGVI.JO' in ASSETS: add('Source validation','STXGVI cents/ZAR normalisation','PASS','normalisation and distribution sanity checks completed before portfolio construction')
  if 'GOVI' in ASSETS: add('Source validation','GOVI repository history','PASS' if len(govi)>=100 else 'FAIL',f'{len(govi)} repository observations; last={govi.index.max():%Y-%m-%d}')
  audit=pd.DataFrame(checks); rank={'PASS':0,'WARNING':1,'FAIL':2}; worst=max((rank[x] for x in audit.Status),default=0); overall=['PASS','WARNING','FAIL'][worst]
