@@ -153,41 +153,23 @@ def _reconstruct_daily_components(close,div,splits,reinvest):
 def build_master(selected,reinvest):
  yahoo=[x for x in selected if x!='GOVI']; yp,yd,ys=load_ticker_components(tuple(yahoo)) if yahoo else ({},{},{})
  if yahoo:
-  # Build one DAILY portfolio calendar from the union of genuine price dates and
-  # corporate-action dates. Each asset keeps its last genuine Close until it trades again.
-  daily_index=pd.DatetimeIndex([])
-  for x in yahoo:
-   daily_index=daily_index.union(yp[x].index).union(yd[x].index)
-  daily_index=daily_index.sort_values()
-  raw=pd.DataFrame({x:yp[x].reindex(daily_index) for x in yahoo},index=daily_index)
-  first_common=max(yp[x].index.min() for x in yahoo)
-  last_common=min(yp[x].index.max() for x in yahoo)
-  raw=raw.loc[(raw.index>=first_common)&(raw.index<=last_common)]
-  daily_index=raw.index
-  # Forward-fill only: no interpolation and no invented price movement.
-  daily_prices=raw.ffill()
-  if daily_prices.isna().any().any(): raise RuntimeError('Unable to establish synchronized daily prices after common inception')
-  daily_divs=pd.DataFrame({x:yd[x].reindex(daily_index,fill_value=0.0) for x in yahoo},index=daily_index).fillna(0.0)
-  if reinvest:
-   # Reinvest each dividend on its event date using that day's genuine/last-carried price.
-   factors=1.0+daily_divs.div(daily_prices)
-   wealth_factor=factors.cumprod()
-   economic_daily=daily_prices*wealth_factor
-   cash_daily=pd.DataFrame(0.0,index=daily_index,columns=yahoo)
-  else:
-   economic_daily=daily_prices
-   cash_daily=daily_divs
-  # Weekly reporting is now only a sampling layer over the completed DAILY path.
-  week_period=daily_index.to_period('W-FRI')
-  sample_pos=pd.Series(np.arange(len(daily_index)),index=daily_index).groupby(week_period).last()
-  actual_dates=pd.DatetimeIndex(sample_pos.index.map(lambda p: daily_index[np.where(week_period==p)[0][-1]]))
+  # Weekly architecture: latest genuine common Close in each W-FRI period.
+  genuine_daily=pd.concat([yp[x].rename(x) for x in yahoo],axis=1)
+  mutual_daily=genuine_daily.dropna(how='any')
+  common_actual=mutual_daily.groupby(mutual_daily.index.to_period('W-FRI')).tail(1)
+  actual_dates=pd.DatetimeIndex(common_actual.index)
   friday_labels=actual_dates.to_period('W-FRI').end_time.normalize()
-  mp=pd.DataFrame({x:economic_daily[x].reindex(actual_dates).to_numpy() for x in yahoo},index=friday_labels)
-  md=pd.DataFrame(0.0,index=friday_labels,columns=yahoo)
-  if not reinvest:
-   for x in yahoo:
-    cum=cash_daily[x].cumsum().reindex(actual_dates).to_numpy(dtype=float)
-    md[x]=np.r_[0.0,np.diff(cum)]
+  mp=pd.DataFrame({x:yp[x].reindex(actual_dates).to_numpy() for x in yahoo},index=friday_labels)
+  mp=mp[~mp.index.duplicated(keep='last')].sort_index()
+  md=pd.DataFrame(0.0,index=mp.index,columns=yahoo)
+  # Preserve all dividend events and assign each once to the interval
+  # (previous genuine common date, current genuine common date].
+  for x in yahoo:
+   events=yd[x].astype(float).sort_index()
+   union=events.index.union(actual_dates).sort_values()
+   cum=events.reindex(union,fill_value=0.0).cumsum()
+   vals=cum.reindex(actual_dates).to_numpy(dtype=float)
+   md[x]=np.r_[0.0,np.diff(vals)]
  else:
   g0=load_govi_history(); mp=pd.DataFrame(index=g0.index); md=pd.DataFrame(index=g0.index)
  g=load_govi_history(); val={'last_govi':g.index.max(),'source':'repository GOVI'}
