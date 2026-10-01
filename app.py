@@ -444,11 +444,13 @@ try:
   else:
    bp=pd.Series(np.nan,index=prices.index,dtype=float); bd=pd.Series(0.0,index=prices.index,dtype=float)
   if len(prices)<2: raise RuntimeError('Selected timeline has fewer than two synchronized portfolio observations')
-  asset_r=(prices-prices.shift(1)+divs)/prices.shift(1); bad=asset_r.abs().max(); bad=bad[bad>(.35 if daily_mode else 1.0)]
-  if len(bad): raise RuntimeError('Implausible asset return(s): '+', '.join(f'{k}={v:.1%}' for k,v in bad.items()))
   fx_translation_report=pd.DataFrame()
   if FX_ADJUST and FX_ADJUSTED_ASSETS:
    prices,divs,fx_translation_report=translate_currency(prices,divs,FX_ADJUSTED_ASSETS,SOURCE_CCYS,BASE_CCY,daily_mode)
+  # All downstream asset-return analytics must use the same currency-adjusted
+  # prices and distributions as the portfolio engine.
+  asset_r=(prices-prices.shift(1)+divs)/prices.shift(1); bad=asset_r.abs().max(); bad=bad[bad>(.35 if daily_mode else 1.0)]
+  if len(bad): raise RuntimeError('Implausible asset return(s): '+', '.join(f'{k}={v:.1%}' for k,v in bad.items()))
   bh=portfolio_values(prices,divs,ALLOC,REINVEST,None)
 except Exception as e: st.error(f'Data update/validation failed: {e}'); st.exception(e); st.stop()
 data_flags=[]
