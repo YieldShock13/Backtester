@@ -72,7 +72,7 @@ def _normalise_stxgvi_close(close):
 def load_ticker_components(tickers):
  prices={}; divs={}; splits={}
  for ticker in tickers:
-  h=yf.Ticker(ticker).history(period='max',interval='1d',auto_adjust=False,actions=True,repair=True,keepna=True)
+  h=yf.Ticker(ticker).history(period='max',interval='1d',auto_adjust=False,actions=True,keepna=True)
   if h.empty: raise RuntimeError(f'Market-data source returned no data for ticker {ticker}')
   h=h.copy(); h.index=pd.to_datetime(h.index).tz_localize(None); h=h.sort_index()
   close=pd.to_numeric(h['Close'],errors='coerce').dropna()
