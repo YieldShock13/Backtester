@@ -34,3 +34,5 @@ for t in TICKERS:
   dt=events.index[-1]; per=dt.to_period('W-FRI'); w=weekly[weekly.index.to_period('W-FRI')==per]
   print('LAST_DIV',t,dt.date(),float(events.loc[dt]),'week_common',str(w.index[0].date()) if len(w) else 'NONE','event_TR',float(r.loc[dt]))
 print('VALIDATION_PASS')
+
+# trigger validation
