@@ -518,7 +518,7 @@ if USE_BENCHMARK and BENCHMARK_FX_ADJUST and not benchmark_fx_report.empty:
 if data_flags: st.warning('DATA FLAGS — '+' | '.join(data_flags))
 mode=st.selectbox('Backtest mode',['Buy & Hold','Rebalanced'],index=0,key='backtest_mode')
 if mode=='Rebalanced':
- rebalance_frequency=st.selectbox('Rebalancing frequency',['Annual','Semi-Annual','Quarterly','Monthly','Weekly'],index=0,key='rebalance_frequency',help='Portfolio is reset to the configured target weights at the first available weekly observation of each selected rebalance period.')
+ rebalance_frequency=st.selectbox('Rebalancing frequency',['Annual','Semi-Annual','Quarterly','Monthly','Weekly'],index=0,key='rebalance_frequency',help='Portfolio is reset to the configured target weights at the first available daily observation of each selected rebalance period.')
  vals=portfolio_values(prices,divs,ALLOC,REINVEST,rebalance_frequency).copy()
  mode_label=f'{rebalance_frequency} Rebalanced'
 else:
@@ -526,8 +526,8 @@ else:
 # Additional leverage is applied to the configured long/short portfolio return. Financing
 # cost is charged only on borrowed capital (L-1), converted to an effective daily rate.
 base_portfolio=vals.PORTFOLIO.copy(); base_r=base_portfolio.pct_change(fill_method=None)
-weekly_financing=(1+LEVERAGE_COST)**(1/ppy)-1
-levered_r=LEVERAGE*base_r-(LEVERAGE-1.0)*weekly_financing
+period_financing=(1+LEVERAGE_COST)**(1/ppy)-1
+levered_r=LEVERAGE*base_r-(LEVERAGE-1.0)*period_financing
 levered_growth=(1+levered_r.fillna(0.0)).cumprod(); vals.loc[:,'PORTFOLIO']=INITIAL*levered_growth
 vals.loc[vals.index[0],'PORTFOLIO']=INITIAL
 market_r=(bp-bp.shift(1)+bd)/bp.shift(1) if USE_BENCHMARK else pd.Series(np.nan,index=prices.index,dtype=float)
@@ -661,7 +661,7 @@ def show_latex_report():
  st.latex(r'r_{i,t}=\frac{P_{i,t}-P_{i,t-1}+D_{i,t}}{P_{i,t-1}}')
  st.latex(r'R^{cap}_i=\frac{P_{i,T}-P_{i,0}}{P_{i,0}},\quad R^{inc}_i=\frac{\sum_{t=1}^{T}D_{i,t}}{P_{i,0}},\quad R^{tot}_i=R^{cap}_i+R^{inc}_i')
  st.latex(r'\omega^{cap}_i=R^{cap}_i/R^{tot}_i,\quad \omega^{inc}_i=R^{inc}_i/R^{tot}_i')
- st.write('Adjusted Close is not used. Distributions are explicit. Split events are captured explicitly. STXGVI uses the validated cents/ZAR normalisation before reconstruction. No automatic FX overlay is applied.')
+ st.write('Daily Adjusted Close is used as the return series. Distributions are embedded in adjusted prices and are not added separately. STXGVI uses the validated cents/ZAR normalisation. No automatic FX overlay is applied.')
  st.dataframe(pd.DataFrame({'Instrument':[instrument_names.get(i,i) for i in ASSETS],'Ticker / Series':ASSETS,'Initial Price':[prices[i].iloc[0] for i in ASSETS],'Final Price':[prices[i].iloc[-1] for i in ASSETS],'Cash Distributions':[divs[i].iloc[1:].sum() for i in ASSETS]}),hide_index=True,use_container_width=True)
  st.header('2. Portfolio initialisation and accounting identity')
  st.latex(r'A_{i,0}=w_iV_0,\qquad q_{i,0}=\frac{A_{i,0}}{P_{i,0}},\qquad \sum_iw_i=1')
@@ -681,7 +681,7 @@ def show_latex_report():
  st.latex(r'Y=\frac{T_{end}-T_{start}}{365.25},\qquad CAGR=\left(\frac{V_T}{V_0}\right)^{1/Y}-1')
  st.write(f'Current CAGR = {met["CAGR"]:.6%}; elapsed observations = {len(prices)}.')
  st.header('6. Volatility and risk-free transformation')
- st.latex(r'N=52\ \text{(weekly)}')
+ st.latex(r'N=252\ \text{(daily)}')
  st.latex(r'\sigma_{ann}=s(r_p)\sqrt{N}')
  st.latex(r'r_{f}=\left(1+R_f\right)^{1/N}-1,\qquad e_t=r_{p,t}-r_f')
  st.write(f'Current N={ppy}; annual RF={RF:.6%}; periodic RF={(1+RF)**(1/ppy)-1:.8%}; annualised volatility={met["Annualised Volatility"]:.6%}.')
@@ -764,11 +764,11 @@ def show_latex_report():
  st.latex(r'VaR^{hist}_{.95,t}=Q_{.05}(r_{p,t-52:t-1})')
  st.latex(r'VaR^{param}_{.95,t}=\\hat\\mu_t+z_{.05}\\hat\\sigma_t,\\qquad z_{.05}=-1.64485')
  st.latex(r'\\sigma_t^2=\\omega+\\alpha\\epsilon_{t-1}^2+\\beta\\sigma_{t-1}^2,\\qquad VaR^{GARCH}_{.95,t}=\\hat\\mu_t+z_{.05}\\hat\\sigma_t')
- st.write('Every estimate is fit only on the preceding 252 daily observations and evaluated on the next held-out week. Historical VaR is empirical; Parametric VaR assumes normal weekly returns; GARCH uses a GARCH(1,1) conditional variance with normal innovations. The displayed breach rate is compared with the nominal 5% rate.')
+ st.write('Every estimate is fit only on the preceding 252 daily observations and evaluated on the next held-out day. Historical VaR is empirical; Parametric VaR assumes normal daily returns; GARCH uses a GARCH(1,1) conditional variance with normal innovations. The displayed breach rate is compared with the nominal 5% rate.')
  st.header('24. Long/short weights and leverage')
  st.latex(r'\sum_i w_i=1,\qquad G=\sum_i|w_i|,\qquad w_i<0\;\Rightarrow\;\text{short position}')
  st.latex(r'r^{(L)}_{p,t}=Lr_{p,t}-(L-1)c_w,\qquad c_w=(1+c_a)^{1/52}-1')
- st.write('Configured weights are normalised to net 100%; negative weights represent short positions and gross exposure may exceed 100%. Additional leverage L scales the configured portfolio periodic return. Financing cost is charged on additional borrowed capital L−1 using the effective weekly equivalent of the annual financing rate. All headline portfolio return/risk metrics use the resulting net-of-financing leveraged portfolio path.')
+ st.write('Configured weights are normalised to net 100%; negative weights represent short positions and gross exposure may exceed 100%. Additional leverage L scales the configured portfolio periodic return. Financing cost is charged on additional borrowed capital L−1 using the effective daily equivalent of the annual financing rate. All headline portfolio return/risk metrics use the resulting net-of-financing leveraged portfolio path.')
  st.header('25. Complete configured metric output')
  st.dataframe(metric_table(met),hide_index=True,use_container_width=True)
 
@@ -816,7 +816,7 @@ def show_audit_report():
   for _,r0 in scenario_df.iterrows():
    n=int(r0.get('Historical Events',0)); add('Macro scenarios',str(r0.get('Scenario','Scenario'))+' event count','PASS' if n>=10 else ('WARNING' if n>=3 else 'FAIL'),f'{n} independent historical event(s)')
  if 'wf' in globals():
-  add('Walk-forward','52-week OOS sample','PASS' if len(wf)>=52 else ('WARNING' if len(wf)>0 else 'FAIL'),f'{len(wf)} held-out daily validation observations')
+  add('Walk-forward','252-day OOS sample','PASS' if len(wf)>=252 else ('WARNING' if len(wf)>0 else 'FAIL'),f'{len(wf)} held-out daily validation observations')
   if not wf.empty:
    nv=int(wf['VaR 95%'].notna().sum()); add('Walk-forward','VaR estimates available','PASS' if nv==len(wf) else 'WARNING',f'{nv}/{len(wf)} one-step VaR estimates available using {wf_method}')
    nb=int(wf['CAPM Forecast'].notna().sum()); add('Walk-forward','CAPM estimates available','PASS' if nb==len(wf) else 'WARNING',f'{nb}/{len(wf)} one-step CAPM forecasts available')
